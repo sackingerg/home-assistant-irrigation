@@ -1,0 +1,181 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# IRRIGATION WEST 2 — HA PACKAGE
+# File: packages/irrigation_west2.yaml
+#
+# Deploy to: config/packages/irrigation_west2.yaml
+# Add to configuration.yaml (if not already using wildcard includes):
+#   homeassistant:
+#     packages:
+#       irrigation_west2: !include packages/irrigation_west2.yaml
+#
+# ESPHome device: irrigation_west2_controller (6-zone west-side board)
+# Stations covered: old Rain Bird stations 7-10 and 12 (terminal 5 is a spare).
+# Mapping CONFIRMED on the ground by me 2026-07-20:
+#   Old station 7  → terminal 1 (GPIO1)    Zone 1 — Near Shed
+#   Old station 8  → terminal 2 (GPIO2)    Zone 2 — North of House
+#   Old station 9  → terminal 3 (GPIO41)   Zone 3 — North Top Edge
+#   Old station 10 → terminal 4 (GPIO42)   Zone 4 — Far West
+#   (no station)   → terminal 5 (GPIO45)   Zone 5 — UNUSED SPARE (old station 11
+#                    has no valve; entity keeps its legacy "station_11" name —
+#                    never rename, references would break silently)
+#   Old station 12 → terminal 6 (GPIO46)   Zone 6 — Center West
+#
+# The Zone Map circles on the irrigation dashboard are labeled with these
+# CONTROLLER ZONE numbers (1-4, 6), not legacy station numbers (my decision,
+# 2026-07-20). Zone 5 has no map circle — it is a spare.
+#
+# All HA helper entity IDs carry the "outside_" area prefix to match the
+# "outside" area assignment used across the irrigation system.
+#
+# SCHEDULE HELPERS — must be UI-created, not YAML:
+#   Go to Settings → Helpers → + Add Helper → Schedule, assign to area "outside":
+#     schedule.outside_west2_zone1_schedule  (Zone 1 — Near Shed)
+#     schedule.outside_west2_zone2_schedule  (Zone 2 — North of House)
+#     schedule.outside_west2_zone3_schedule  (Zone 3 — North Top Edge)
+#     schedule.outside_west2_zone4_schedule  (Zone 4 — Far West)
+#     schedule.outside_west2_zone5_schedule  (Zone 5 — Station 11)
+#     schedule.outside_west2_zone6_schedule  (Zone 6 — Center West)
+#
+# SCHEDULING CORE — add to packages/scheduling_core.yaml:
+#   In schedule_switch_map:
+#     "schedule.outside_west2_zone1_schedule": "switch.outside_irrigation_west2_controller_zone_1_near_shed"
+#     "schedule.outside_west2_zone2_schedule": "switch.outside_irrigation_west2_controller_zone_2_north_of_house"
+#     "schedule.outside_west2_zone3_schedule": "switch.outside_irrigation_west2_controller_zone_3_north_top_edge"
+#     "schedule.outside_west2_zone4_schedule": "switch.outside_irrigation_west2_controller_zone_4_far_west"
+#     "schedule.outside_west2_zone5_schedule": "switch.outside_irrigation_west2_controller_zone_5_station_11"
+#     "schedule.outside_west2_zone6_schedule": "switch.outside_irrigation_west2_controller_zone_6_center_west"
+#   In schedule_enable_map:
+#     "schedule.outside_west2_zone1_schedule": "input_boolean.outside_west2_zone_1_enabled"
+#     ... (same pattern for zones 2-6)
+#   In schedule_master_map:
+#     "schedule.outside_west2_zone1_schedule": "input_boolean.outside_west2_schedule_enabled"
+#     ... (same pattern for zones 2-6)
+#   In trigger list: add platform: state entries for all 6 outside_west2 schedule entities
+#
+# RESOLVED 2026-07-20: Zone 5 confirmed as an unused spare (old station 11 has
+# no valve). Do not schedule it; keep its enable toggle off. If a new valve is
+# ever landed on terminal 5, update the header mapping above and add a map
+# circle labeled "5".
+# ─────────────────────────────────────────────────────────────────────────────
+
+input_boolean:
+  outside_west2_schedule_enabled:
+    name: "West 2 Schedule Enabled"
+    icon: mdi:calendar-clock
+
+  outside_west2_zone_1_enabled:
+    name: "West 2 Zone 1 Enabled"
+    icon: mdi:calendar-check
+  outside_west2_zone_2_enabled:
+    name: "West 2 Zone 2 Enabled"
+    icon: mdi:calendar-check
+  outside_west2_zone_3_enabled:
+    name: "West 2 Zone 3 Enabled"
+    icon: mdi:calendar-check
+  outside_west2_zone_4_enabled:
+    name: "West 2 Zone 4 Enabled"
+    icon: mdi:calendar-check
+  outside_west2_zone_5_enabled:
+    name: "West 2 Zone 5 Enabled"
+    icon: mdi:calendar-check
+  outside_west2_zone_6_enabled:
+    name: "West 2 Zone 6 Enabled"
+    icon: mdi:calendar-check
+
+input_number:
+  outside_west2_zone_1_duration:
+    name: "West 2 Zone 1 Duration"
+    min: 1
+    max: 60
+    step: 1
+    unit_of_measurement: min
+    icon: mdi:timer
+  outside_west2_zone_2_duration:
+    name: "West 2 Zone 2 Duration"
+    min: 1
+    max: 60
+    step: 1
+    unit_of_measurement: min
+    icon: mdi:timer
+  outside_west2_zone_3_duration:
+    name: "West 2 Zone 3 Duration"
+    min: 1
+    max: 60
+    step: 1
+    unit_of_measurement: min
+    icon: mdi:timer
+  outside_west2_zone_4_duration:
+    name: "West 2 Zone 4 Duration"
+    min: 1
+    max: 60
+    step: 1
+    unit_of_measurement: min
+    icon: mdi:timer
+  outside_west2_zone_5_duration:
+    name: "West 2 Zone 5 Duration"
+    min: 1
+    max: 60
+    step: 1
+    unit_of_measurement: min
+    icon: mdi:timer
+  outside_west2_zone_6_duration:
+    name: "West 2 Zone 6 Duration"
+    min: 1
+    max: 60
+    step: 1
+    unit_of_measurement: min
+    icon: mdi:timer
+
+
+input_text:
+  outside_west2_status:
+    name: "West 2 Status"
+    icon: mdi:information-outline
+    max: 255
+
+timer:
+  outside_west2_zone_1_timer:
+    name: "West 2 Zone 1 Timer"
+    icon: mdi:timer-sand
+    restore: false
+  outside_west2_zone_2_timer:
+    name: "West 2 Zone 2 Timer"
+    icon: mdi:timer-sand
+    restore: false
+  outside_west2_zone_3_timer:
+    name: "West 2 Zone 3 Timer"
+    icon: mdi:timer-sand
+    restore: false
+  outside_west2_zone_4_timer:
+    name: "West 2 Zone 4 Timer"
+    icon: mdi:timer-sand
+    restore: false
+  outside_west2_zone_5_timer:
+    name: "West 2 Zone 5 Timer"
+    icon: mdi:timer-sand
+    restore: false
+  outside_west2_zone_6_timer:
+    name: "West 2 Zone 6 Timer"
+    icon: mdi:timer-sand
+    restore: false
+
+# NOTE: this package no longer defines any scripts.
+# ───────────────────────────────────────────────────────────────────────────
+# The three scripts that used to live here — west2_run_single_zone, west2_stop_all, west2_sequential_run —
+# were removed 2026-08-10 and replaced by ONE generic implementation in
+# packages/irrigation_zone_engine.yaml:
+#
+#     script.irrigation_run_zone         (system, zone[, run_minutes])
+#     script.irrigation_stop_zone        (system, zone)
+#     script.irrigation_stop_controller  (system)
+#     script.irrigation_sequential_run   (system)
+#
+# WHY: four hand-maintained copies of the same logic had drifted. West 1 and
+# West 2 ended a manual run with an unconditional switch.turn_off after a
+# plain delay; East and Garden did not. Because the script was mode: parallel,
+# each "Run Now" press left a delayed shutoff behind that cut short whatever
+# run was in progress when it fired — a 15-minute run measured 10m44s on
+# 2026-08-10. One implementation means no controller can drift again.
+#
+# This file now owns only this controller's HELPERS. Behaviour is shared.
+# ───────────────────────────────────────────────────────────────────────────

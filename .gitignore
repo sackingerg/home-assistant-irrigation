@@ -1,0 +1,31 @@
+# NEVER commit real credentials
+secrets.yaml
+*.secret
+!secrets.yaml.example
+
+# ESPHome build artefacts
+.esphome/
+esphome/.esphome/
+*.bin
+*.elf
+
+# Home Assistant runtime state — contains tokens, device IDs and history
+.storage/
+*.db
+*.db-*
+*.log
+home-assistant.log*
+
+# Property imagery: supply your own, don't publish someone's aerial photo
+www/
+*.jpg
+*.jpeg
+*.png
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp

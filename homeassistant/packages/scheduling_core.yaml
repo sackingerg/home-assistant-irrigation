@@ -1,0 +1,708 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# SCHEDULING CORE — PER-ZONE SCHEDULE REACTOR (single mode)
+# Package: packages/scheduling_core.yaml
+#
+# Rewritten 2026-07-08, my decision: the two-mode design (controller-level
+# "run them all" sessions) was too complicated — changing one zone's seasonal
+# runtime meant re-sizing the whole controller block. REMOVED. The sprinklers
+# now work strictly on the per-zone schedules:
+#
+#   THE SCHEDULE BLOCK **IS** THE RUNTIME.
+#   Zone block 8:00-8:15 → zone runs at 8:00 for 15 minutes.
+#   Want 20 minutes when it warms up? Widen that block to 8:00-8:20. Done.
+#
+# HOW A ZONE STARTS — GPM POLICY REDESIGNED 2026-07-27 (my decision)
+# ─────────────────────────────────────────────────────────────────────────────
+# VERIFY BEFORE, NEVER BLOCK DURING. The old runtime GPM gate checked the
+# programmed total at every zone start; at exact block boundaries (one block
+# ending 22:30:00, the next starting 22:30:00) the two schedule entities
+# update in arbitrary callback order, and the gate sometimes counted the
+# ENDING zone as still on — W1 Z3 was skipped that way (26 "programmed" GPM
+# that was really a 17 ms stale read, 2026-07-27). My decision: the
+# pump recovers from brief over-limit during zone switch-over, so runtime
+# blocking is all risk and no benefit. Now:
+#
+#   1. GRID VERIFICATION (before anything runs): the "Schedule Grid
+#      Over-Limit Verification" automation below re-checks the programmed
+#      week whenever the grid changes (and after HA start). If any moment
+#      of the week programs more than the pump limit, it raises a
+#      persistent notification naming the zones and days (the Weekly
+#      Pattern's yellow triangles show the same thing) and auto-dismisses
+#      it once the grid is fixed. Fix the grid THEN — nothing will stop
+#      the zones at runtime.
+#   2. Zone schedule block turns ON → reactor resolves the zone via the
+#      maps below, checks per-zone enable + controller master, computes
+#      remaining block minutes, and starts the zone via the retrying
+#      starter. NO GPM check, no skip — a scheduled, enabled zone ALWAYS
+#      starts. run_minutes = remaining block time; the ESP32's own
+#      auto-off timer closes the valve at block end (firmware stays the
+#      single source of shutoff truth).
+#   3. The ONLY runtime limit is in the local controllers: ESP32 firmware
+#      allows max 2 zones per board and rejects a 3rd by pulsing its
+#      switch on→off.
+#   4. INTERLOCK RETRY (my decision, 2026-07-13/14 — kept, it is a start
+#      guarantee, not a safety check): valves don't shut instantly
+#      (motorized valves can take >15 s), so a zone starting exactly as
+#      its predecessor closes can be rejected by the max-2 backstop. If
+#      the zone switch is still off 5 s after a start attempt, ONE retry
+#      fires 30 s after the first attempt with the runtime reduced by one
+#      whole minute (run still ends by block end). If the retry is also
+#      rejected, 2 zones are genuinely running on that board — it gives
+#      up loudly (error log + persistent notification + red action-log
+#      entry, no phone push). Runs in a parallel script so it never
+#      delays other zones' starts.
+#
+# The zone's input_number "Run Now Duration" is NOT used for scheduled runs —
+# it only drives the manual Run Now buttons and the manual sequential runners.
+#
+# RESTART SAFETY
+# ─────────────────────────────────────────────────────────────────────────────
+# On HA restart, every zone schedule currently inside a block (and enabled,
+# master on, valve not already open) is started for the REMAINING block time —
+# a reboot mid-block resumes the zone and still ends it on schedule.
+#
+# CONCURRENCY
+# ─────────────────────────────────────────────────────────────────────────────
+# Zones running simultaneously is allowed and governed by:
+#   - grid verification at programming time (see HOW A ZONE STARTS #1) —
+#     the ONLY pump-limit enforcement point, and it is advisory
+#   - the ESP32 firmware max-2-zones-per-controller live-state backstop
+#     (starts it rejects are re-tried per the INTERLOCK RETRY policy above)
+#   - the GPM monitor package (dashboard banner if >20 regardless of how;
+#     brief switch-over overlaps are expected and tolerated by the pump)
+# Sequence zones by staggering their blocks in the weekly grid.
+#
+# NOTIFICATION POLICY (my decision, 2026-07-13): NO push notifications anywhere
+# in irrigation. Irrigation runs at night while my phone is in silent mode,
+# so pushes never arrive — problems must surface through persistent
+# notifications, the system log, and the Irrigation Action Log instead.
+#
+# ONBOARDING A NEW ZONE: create its schedule.* helper via UI (plain name →
+# assign area Outside → refresh entity ID), then add it to the trigger list
+# and to every zone_* map below.
+# ─────────────────────────────────────────────────────────────────────────────
+
+script:
+  # NOTE: the runtime GPM gate (script.outside_irrigation_checked_zone_start)
+  # was REMOVED 2026-07-27, my decision — pump-limit enforcement moved to
+  # programming-time grid verification (automation below). The reactor now
+  # calls the retrying starter directly; nothing blocks a zone at runtime.
+  outside_irrigation_retrying_zone_start:
+    alias: "Outside Irrigation — Interlock-Retrying Zone Start"
+    icon: mdi:water-sync
+    description: >-
+      Starts a zone via script.irrigation_run_zone and verifies the valve
+      actually opened. The ESP32 max-2-zones interlock rejects a
+      start by pulsing the switch on→off, so "switch still off 5 s after the
+      attempt" = rejected. One retry, 30 s after the first attempt (enough
+      for a motorized valve to finish closing), with the runtime reduced
+      one whole minute so the run still ends by the original block end. If
+      the retry is also rejected, the cause isn't valve lag; give up
+      loudly. An UNAVAILABLE zone switch (controller offline — command
+      never received) takes the same log→retry→give-up path, with the
+      offline cause named in every message (my decision, 2026-07-27). No GPM
+      checks here or anywhere at runtime (policy 2026-07-27) — the grid
+      is verified at programming time instead.
+    mode: parallel
+    max: 25
+    fields:
+      system:
+        description: "Controller key: east | garden | west1 | west2"
+      zone_number:
+        description: "Zone number on that controller"
+      zone_entity:
+        description: "Zone switch entity — used to verify the valve actually opened"
+      run_minutes:
+        description: "Runtime in minutes for the first attempt (remaining schedule block time)"
+    sequence:
+      # Every zone start on the property goes through script.irrigation_run_zone
+      # (packages/irrigation_zone_engine.yaml) — scheduled, manual, or sequenced.
+      # One implementation, so no controller can drift from another.
+      - action: script.turn_on
+        data:
+          entity_id: script.irrigation_run_zone
+          variables:
+            system: "{{ system }}"
+            zone: "{{ zone_number }}"
+            run_minutes: "{{ run_minutes | float(0) }}"
+      # The runner arms the ESP32 duration and opens the valve within ~1 s;
+      # 5 s is enough for the firmware's accept/reject verdict to propagate
+      # back, and far shorter than any legitimate run.
+      - delay:
+          seconds: 5
+      # "not on" (rather than "off") so an UNAVAILABLE switch — controller
+      # offline, command never received — also takes the log→retry path
+      # instead of silently ending here (hole fixed 2026-07-27).
+      - if:
+          - condition: template
+            value_template: "{{ not is_state(zone_entity, 'on') }}"
+        then:
+          - action: system_log.write
+            data:
+              level: warning
+              message: >-
+                {% if states(zone_entity) in ['unavailable', 'unknown'] %}
+                Irrigation controller offline: {{ zone_entity }} is
+                unavailable — the start command was not confirmed.
+                Retrying in 30 s with runtime reduced 1 min.
+                {% else %}
+                Irrigation interlock rejected {{ zone_entity }} — ESP32
+                max-2-zones backstop (previous zone's valve likely still
+                closing). Retrying in 30 s with runtime reduced 1 min.
+                {% endif %}
+          # retry lands 30 s after the first attempt (5 s check + 25 s wait)
+          - delay:
+              seconds: 25
+          - action: script.turn_on
+            data:
+              entity_id: script.irrigation_run_zone
+              variables:
+                system: "{{ system }}"
+                zone: "{{ zone_number }}"
+                run_minutes: "{{ [(run_minutes | float(0)) - 1, 1] | max }}"
+          - delay:
+              seconds: 5
+          - if:
+              - condition: template
+                value_template: "{{ is_state(zone_entity, 'on') }}"
+            then:
+              # started on the retry → surface it (yellow action-log entry)
+              - event: irrigation_zone_retried
+                event_data:
+                  zone_entity: "{{ zone_entity }}"
+                  attempts: 2
+                  trimmed_sec: 60
+            else:
+              # retry also failed → give up LOUDLY (no push), naming the
+              # actual cause: controller offline vs interlock refusal
+              - variables:
+                  offline: >-
+                    {{ states(zone_entity) in ['unavailable', 'unknown'] }}
+                  cause_short: >-
+                    {{ 'controller offline/unreachable' if offline
+                       else 'max-2-zones interlock' }}
+              - action: system_log.write
+                data:
+                  level: error
+                  message: >-
+                    {% if offline %}
+                    Irrigation zone {{ zone_entity }} NOT started — the
+                    controller is offline: the zone switch is unavailable and
+                    neither start command was confirmed. Check the
+                    controller's power and WiFi.
+                    {% else %}
+                    Irrigation zone {{ zone_entity }} NOT started — ESP32
+                    max-2-zones interlock rejected the 30 s retry too. Two
+                    other zones on that controller are genuinely running;
+                    stagger the schedule grid.
+                    {% endif %}
+              - action: persistent_notification.create
+                data:
+                  notification_id: "irrigation_zone_failed_{{ zone_entity }}"
+                  title: "🚫 Zone did not start"
+                  message: >-
+                    {{ state_attr(zone_entity, 'friendly_name') or zone_entity }}
+                    was NOT started ({{ cause_short }}).
+                    {% if offline %}
+                    The controller never confirmed either start command —
+                    check its power and WiFi.
+                    {% else %}
+                    The ESP32 rejected the start and the 30 s retry because
+                    2 other zones on the same controller stayed open —
+                    stagger that controller's schedule blocks.
+                    {% endif %}
+              # feed the Irrigation Action Log (red entry, cause included)
+              - event: irrigation_zone_rejected
+                event_data:
+                  zone_entity: "{{ zone_entity }}"
+                  attempts: 2
+                  cause: "{{ cause_short }}"
+
+automation:
+  - id: schedule_reactor
+    alias: "Schedule Reactor"
+    description: >-
+      Per-zone schedule reactor: zone block ON → start that zone for the
+      remaining block time via the interlock-retrying starter. No runtime GPM
+      check (policy 2026-07-27 — pump-limit enforcement is the programming-time
+      grid verification automation instead). Restart path resumes zones
+      mid-block. The schedule grid is the single source of watering truth.
+    triggers:
+      - trigger: state
+        entity_id:
+          # East zones (6)
+          - schedule.outside_zone_1_schedule_front_driveway
+          - schedule.outside_zone_2_schedule
+          - schedule.outside_zone_3_schedule
+          - schedule.outside_zone_4_schedule
+          - schedule.outside_zone_5_schedule
+          - schedule.outside_zone_6_schedule
+          # Garden zones (3)
+          - schedule.outside_garden_zone_1_schedule
+          - schedule.outside_garden_zone_2_schedule
+          - schedule.outside_garden_zone_3_schedule
+          # West 1 zones (6)
+          - schedule.outside_west1_zone1_schedule
+          - schedule.outside_west1_zone2_schedule
+          - schedule.outside_west1_zone3_schedule
+          - schedule.outside_west1_zone4_schedule
+          - schedule.outside_west1_zone5_schedule
+          - schedule.outside_west1_zone6_schedule
+          # West 2 zones (6)
+          - schedule.outside_west2_zone1_schedule
+          - schedule.outside_west2_zone2_schedule
+          - schedule.outside_west2_zone3_schedule
+          - schedule.outside_west2_zone4_schedule
+          - schedule.outside_west2_zone5_schedule
+          - schedule.outside_west2_zone6_schedule
+        to: "on"
+        id: zone_on
+      - trigger: homeassistant
+        event: start
+        id: ha_restart
+
+    variables:
+      all_zone_schedules:
+        - schedule.outside_zone_1_schedule_front_driveway
+        - schedule.outside_zone_2_schedule
+        - schedule.outside_zone_3_schedule
+        - schedule.outside_zone_4_schedule
+        - schedule.outside_zone_5_schedule
+        - schedule.outside_zone_6_schedule
+        - schedule.outside_garden_zone_1_schedule
+        - schedule.outside_garden_zone_2_schedule
+        - schedule.outside_garden_zone_3_schedule
+        - schedule.outside_west1_zone1_schedule
+        - schedule.outside_west1_zone2_schedule
+        - schedule.outside_west1_zone3_schedule
+        - schedule.outside_west1_zone4_schedule
+        - schedule.outside_west1_zone5_schedule
+        - schedule.outside_west1_zone6_schedule
+        - schedule.outside_west2_zone1_schedule
+        - schedule.outside_west2_zone2_schedule
+        - schedule.outside_west2_zone3_schedule
+        - schedule.outside_west2_zone4_schedule
+        - schedule.outside_west2_zone5_schedule
+        - schedule.outside_west2_zone6_schedule
+
+      zone_switch_map:
+        # East
+        schedule.outside_zone_1_schedule_front_driveway: switch.outside_irrigation_east_zone_1_front_driveway
+        schedule.outside_zone_2_schedule:                switch.outside_irrigation_east_zone_2_east_property_line
+        schedule.outside_zone_3_schedule:                switch.outside_irrigation_east_zone_3_driveway_east
+        schedule.outside_zone_4_schedule:                switch.outside_irrigation_east_zone_4_southeast_property_line
+        schedule.outside_zone_5_schedule:                switch.outside_irrigation_east_zone_5_east_side_flower_bed
+        schedule.outside_zone_6_schedule:                switch.outside_irrigation_east_zone_6_east_patio
+        # Garden
+        schedule.outside_garden_zone_1_schedule:         switch.outside_irrigation_garden_controller_zone_1_strawberries
+        schedule.outside_garden_zone_2_schedule:         switch.outside_irrigation_garden_controller_zone_2_blueberry_blackberry_bed
+        schedule.outside_garden_zone_3_schedule:         switch.outside_irrigation_garden_controller_zone_3_dripper_system
+        # West 1
+        schedule.outside_west1_zone1_schedule:           switch.outside_irrigation_west1_controller_zone_1_south_center_a
+        schedule.outside_west1_zone2_schedule:           switch.outside_irrigation_west1_controller_zone_2_south_center_b
+        schedule.outside_west1_zone3_schedule:           switch.outside_irrigation_west1_controller_zone_3_south_center_c
+        schedule.outside_west1_zone4_schedule:           switch.outside_irrigation_west1_controller_zone_4_southwest
+        schedule.outside_west1_zone5_schedule:           switch.outside_irrigation_west1_controller_zone_5_west_center
+        schedule.outside_west1_zone6_schedule:           switch.outside_irrigation_west1_controller_zone_6_far_west_edge
+        # West 2
+        schedule.outside_west2_zone1_schedule:           switch.outside_irrigation_west2_controller_zone_1_near_shed
+        schedule.outside_west2_zone2_schedule:           switch.outside_irrigation_west2_controller_zone_2_north_of_house
+        schedule.outside_west2_zone3_schedule:           switch.outside_irrigation_west2_controller_zone_3_north_top_edge
+        schedule.outside_west2_zone4_schedule:           switch.outside_irrigation_west2_controller_zone_4_far_west
+        schedule.outside_west2_zone5_schedule:           switch.outside_irrigation_west2_controller_zone_5_station_11
+        schedule.outside_west2_zone6_schedule:           switch.outside_irrigation_west2_controller_zone_6_center_west
+
+      # NOTE: zone_gpm_map was deleted 2026-08-07. It fed the runtime GPM gate
+      # that was removed on 2026-07-27; nothing had referenced it since. Per-zone
+      # GPM is still wired into the two places that DO use it — the day-strip
+      # sensor's command template at the bottom of this file, and the Run
+      # Controller pre-flight in packages/irrigation_zone_engine.yaml.
+
+      zone_number_map:
+        schedule.outside_zone_1_schedule_front_driveway: 1
+        schedule.outside_zone_2_schedule:                2
+        schedule.outside_zone_3_schedule:                3
+        schedule.outside_zone_4_schedule:                4
+        schedule.outside_zone_5_schedule:                5
+        schedule.outside_zone_6_schedule:                6
+        schedule.outside_garden_zone_1_schedule:         1
+        schedule.outside_garden_zone_2_schedule:         2
+        schedule.outside_garden_zone_3_schedule:         3
+        schedule.outside_west1_zone1_schedule:           1
+        schedule.outside_west1_zone2_schedule:           2
+        schedule.outside_west1_zone3_schedule:           3
+        schedule.outside_west1_zone4_schedule:           4
+        schedule.outside_west1_zone5_schedule:           5
+        schedule.outside_west1_zone6_schedule:           6
+        schedule.outside_west2_zone1_schedule:           1
+        schedule.outside_west2_zone2_schedule:           2
+        schedule.outside_west2_zone3_schedule:           3
+        schedule.outside_west2_zone4_schedule:           4
+        schedule.outside_west2_zone5_schedule:           5
+        schedule.outside_west2_zone6_schedule:           6
+
+      # Which controller each schedule belongs to. Replaced zone_script_map
+      # on 2026-08-10: every zone now runs through script.irrigation_run_zone,
+      # so the reactor passes a controller key instead of a script entity.
+      zone_system_map:
+        schedule.outside_zone_1_schedule_front_driveway: east
+        schedule.outside_zone_2_schedule:                east
+        schedule.outside_zone_3_schedule:                east
+        schedule.outside_zone_4_schedule:                east
+        schedule.outside_zone_5_schedule:                east
+        schedule.outside_zone_6_schedule:                east
+        schedule.outside_garden_zone_1_schedule:         garden
+        schedule.outside_garden_zone_2_schedule:         garden
+        schedule.outside_garden_zone_3_schedule:         garden
+        schedule.outside_west1_zone1_schedule:           west1
+        schedule.outside_west1_zone2_schedule:           west1
+        schedule.outside_west1_zone3_schedule:           west1
+        schedule.outside_west1_zone4_schedule:           west1
+        schedule.outside_west1_zone5_schedule:           west1
+        schedule.outside_west1_zone6_schedule:           west1
+        schedule.outside_west2_zone1_schedule:           west2
+        schedule.outside_west2_zone2_schedule:           west2
+        schedule.outside_west2_zone3_schedule:           west2
+        schedule.outside_west2_zone4_schedule:           west2
+        schedule.outside_west2_zone5_schedule:           west2
+        schedule.outside_west2_zone6_schedule:           west2
+      zone_enable_map:
+        # East
+        schedule.outside_zone_1_schedule_front_driveway: input_boolean.outside_irrigation_zone_1_enabled
+        schedule.outside_zone_2_schedule:                input_boolean.outside_irrigation_zone_2_enabled
+        schedule.outside_zone_3_schedule:                input_boolean.outside_irrigation_zone_3_enabled
+        schedule.outside_zone_4_schedule:                input_boolean.outside_irrigation_zone_4_enabled
+        schedule.outside_zone_5_schedule:                input_boolean.outside_irrigation_zone_5_enabled
+        schedule.outside_zone_6_schedule:                input_boolean.outside_irrigation_zone_6_enabled
+        # Garden
+        schedule.outside_garden_zone_1_schedule:         input_boolean.outside_garden_zone_1_enabled
+        schedule.outside_garden_zone_2_schedule:         input_boolean.outside_garden_zone_2_enabled
+        schedule.outside_garden_zone_3_schedule:         input_boolean.outside_garden_zone_3_enabled
+        # West 1
+        schedule.outside_west1_zone1_schedule:           input_boolean.outside_west1_zone_1_enabled
+        schedule.outside_west1_zone2_schedule:           input_boolean.outside_west1_zone_2_enabled
+        schedule.outside_west1_zone3_schedule:           input_boolean.outside_west1_zone_3_enabled
+        schedule.outside_west1_zone4_schedule:           input_boolean.outside_west1_zone_4_enabled
+        schedule.outside_west1_zone5_schedule:           input_boolean.outside_west1_zone_5_enabled
+        schedule.outside_west1_zone6_schedule:           input_boolean.outside_west1_zone_6_enabled
+        # West 2
+        schedule.outside_west2_zone1_schedule:           input_boolean.outside_west2_zone_1_enabled
+        schedule.outside_west2_zone2_schedule:           input_boolean.outside_west2_zone_2_enabled
+        schedule.outside_west2_zone3_schedule:           input_boolean.outside_west2_zone_3_enabled
+        schedule.outside_west2_zone4_schedule:           input_boolean.outside_west2_zone_4_enabled
+        schedule.outside_west2_zone5_schedule:           input_boolean.outside_west2_zone_5_enabled
+        schedule.outside_west2_zone6_schedule:           input_boolean.outside_west2_zone_6_enabled
+
+      zone_master_map:
+        # East
+        schedule.outside_zone_1_schedule_front_driveway: input_boolean.outside_irrigation_schedule_enabled
+        schedule.outside_zone_2_schedule:                input_boolean.outside_irrigation_schedule_enabled
+        schedule.outside_zone_3_schedule:                input_boolean.outside_irrigation_schedule_enabled
+        schedule.outside_zone_4_schedule:                input_boolean.outside_irrigation_schedule_enabled
+        schedule.outside_zone_5_schedule:                input_boolean.outside_irrigation_schedule_enabled
+        schedule.outside_zone_6_schedule:                input_boolean.outside_irrigation_schedule_enabled
+        # Garden
+        schedule.outside_garden_zone_1_schedule:         input_boolean.outside_garden_schedule_enabled
+        schedule.outside_garden_zone_2_schedule:         input_boolean.outside_garden_schedule_enabled
+        schedule.outside_garden_zone_3_schedule:         input_boolean.outside_garden_schedule_enabled
+        # West 1
+        schedule.outside_west1_zone1_schedule:           input_boolean.outside_west1_schedule_enabled
+        schedule.outside_west1_zone2_schedule:           input_boolean.outside_west1_schedule_enabled
+        schedule.outside_west1_zone3_schedule:           input_boolean.outside_west1_schedule_enabled
+        schedule.outside_west1_zone4_schedule:           input_boolean.outside_west1_schedule_enabled
+        schedule.outside_west1_zone5_schedule:           input_boolean.outside_west1_schedule_enabled
+        schedule.outside_west1_zone6_schedule:           input_boolean.outside_west1_schedule_enabled
+        # West 2
+        schedule.outside_west2_zone1_schedule:           input_boolean.outside_west2_schedule_enabled
+        schedule.outside_west2_zone2_schedule:           input_boolean.outside_west2_schedule_enabled
+        schedule.outside_west2_zone3_schedule:           input_boolean.outside_west2_schedule_enabled
+        schedule.outside_west2_zone4_schedule:           input_boolean.outside_west2_schedule_enabled
+        schedule.outside_west2_zone5_schedule:           input_boolean.outside_west2_schedule_enabled
+        schedule.outside_west2_zone6_schedule:           input_boolean.outside_west2_schedule_enabled
+
+    actions:
+      - choose:
+
+          # ── Path A: a zone's schedule block turned ON ──────────────────────
+          - conditions:
+              - condition: trigger
+                id: zone_on
+            sequence:
+              - variables:
+                  s: "{{ trigger.entity_id }}"
+                  zone_sw: "{{ zone_switch_map.get(s) }}"
+                  run_min: >-
+                    {% set ev = state_attr(s, 'next_event') %}
+                    {{ (((ev | as_datetime - now()).total_seconds() / 60) | round(0, 'ceil') | int) if ev else 0 }}
+              - if:
+                  - condition: template
+                    value_template: >-
+                      {{ zone_sw is not none
+                         and is_state(zone_master_map.get(s), 'on')
+                         and is_state(zone_enable_map.get(s), 'on')
+                         and is_state(zone_sw, 'off')
+                         and run_min | int(0) > 0 }}
+                then:
+                  # no runtime GPM check (policy 2026-07-27) — straight to start
+                  - action: script.turn_on
+                    data:
+                      entity_id: script.outside_irrigation_retrying_zone_start
+                      variables:
+                        system:          "{{ zone_system_map.get(s) }}"
+                        zone_number:     "{{ zone_number_map.get(s) }}"
+                        zone_entity:     "{{ zone_sw }}"
+                        run_minutes:     "{{ [run_min | int(0), 240] | min }}"
+
+          # ── Path B: HA restart — resume any zone still inside its block ────
+          - conditions:
+              - condition: trigger
+                id: ha_restart
+            sequence:
+              - repeat:
+                  for_each: "{{ all_zone_schedules }}"
+                  sequence:
+                    - variables:
+                        s: "{{ repeat.item }}"
+                        zone_sw: "{{ zone_switch_map.get(s) }}"
+                        run_min: >-
+                          {% set ev = state_attr(s, 'next_event') %}
+                          {{ (((ev | as_datetime - now()).total_seconds() / 60) | round(0, 'ceil') | int) if ev else 0 }}
+                    - if:
+                        - condition: template
+                          value_template: >-
+                            {{ zone_sw is not none
+                               and is_state(s, 'on')
+                               and is_state(zone_master_map.get(s), 'on')
+                               and is_state(zone_enable_map.get(s), 'on')
+                               and is_state(zone_sw, 'off')
+                               and run_min | int(0) > 0 }}
+                      then:
+                        # no runtime GPM check (policy 2026-07-27)
+                        - action: script.turn_on
+                          data:
+                            entity_id: script.outside_irrigation_retrying_zone_start
+                            variables:
+                              system:          "{{ zone_system_map.get(s) }}"
+                              zone_number:     "{{ zone_number_map.get(s) }}"
+                              zone_entity:     "{{ zone_sw }}"
+                              run_minutes:     "{{ [run_min | int(0), 240] | min }}"
+
+    # queued so simultaneous block starts each get processed; each start hands
+    # straight to the parallel retrying starter, so the queue drains instantly.
+    mode: queued
+    max: 25
+
+
+  # ── WEEKLY PATTERN REFRESH ──────────────────────────────────────────────────
+  # The day-strip sensor normally polls every 60s. This automation forces an
+  # immediate re-read whenever any zone schedule changes (block edits move
+  # next_event; block start/end flips state — both fire this). The second
+  # update 15s later covers HA's delayed write of .storage/schedule, which is
+  # the file the sensor's python script reads. The 60s poll remains as the
+  # backstop for edits that don't change next_event (e.g. adding a block on a
+  # later day than the current next event).
+  - id: irrigation_schedule_days_refresh
+    alias: "Irrigation — Refresh Weekly Pattern on Schedule Edit"
+    triggers:
+      - trigger: state
+        entity_id:
+          - schedule.outside_zone_1_schedule_front_driveway
+          - schedule.outside_zone_2_schedule
+          - schedule.outside_zone_3_schedule
+          - schedule.outside_zone_4_schedule
+          - schedule.outside_zone_5_schedule
+          - schedule.outside_zone_6_schedule
+          - schedule.outside_garden_zone_1_schedule
+          - schedule.outside_garden_zone_2_schedule
+          - schedule.outside_garden_zone_3_schedule
+          - schedule.outside_west1_zone1_schedule
+          - schedule.outside_west1_zone2_schedule
+          - schedule.outside_west1_zone3_schedule
+          - schedule.outside_west1_zone4_schedule
+          - schedule.outside_west1_zone5_schedule
+          - schedule.outside_west1_zone6_schedule
+          - schedule.outside_west2_zone1_schedule
+          - schedule.outside_west2_zone2_schedule
+          - schedule.outside_west2_zone3_schedule
+          - schedule.outside_west2_zone4_schedule
+          - schedule.outside_west2_zone5_schedule
+          - schedule.outside_west2_zone6_schedule
+    actions:
+      - action: homeassistant.update_entity
+        target:
+          entity_id: sensor.irrigation_schedule_days
+      - delay:
+          seconds: 15
+      - action: homeassistant.update_entity
+        target:
+          entity_id: sensor.irrigation_schedule_days
+    # restart: rapid successive edits coalesce into one refresh cycle
+    mode: restart
+
+
+  # ── SCHEDULE GRID OVER-LIMIT VERIFICATION ──────────────────────────────────
+  # Pre-run verification (my decision, 2026-07-27): pump-limit enforcement happens
+  # HERE, at programming time — never at zone start. Whenever the day-strip
+  # sensor re-reads the grid (60 s poll + immediate refresh on edits), any
+  # zone/day combination whose programmed simultaneous total exceeds the pump
+  # limit raises ONE persistent notification listing them (same data as the
+  # Weekly Pattern's yellow triangles); it auto-dismisses once the grid is
+  # fixed. Zones will RUN an over-limit grid regardless — the only runtime
+  # limit is the per-controller max-2 firmware backstop, and the pump
+  # tolerates brief over-limit during zone switch-over.
+  - id: irrigation_grid_over_limit_verification
+    alias: "Irrigation — Schedule Grid Over-Limit Verification"
+    triggers:
+      # no to:/from: — fires on attribute-only changes of the day-strip sensor
+      - trigger: state
+        entity_id: sensor.irrigation_schedule_days
+    actions:
+      - variables:
+          zone_labels:
+            zone_1: "East Z1"
+            zone_2: "East Z2"
+            zone_3: "East Z3"
+            zone_4: "East Z4"
+            zone_5: "East Z5"
+            zone_6: "East Z6"
+            garden_zone_1: "Garden Z1"
+            garden_zone_2: "Garden Z2"
+            garden_zone_3: "Garden Z3"
+            west1_zone1: "West1 Z1"
+            west1_zone2: "West1 Z2"
+            west1_zone3: "West1 Z3"
+            west1_zone4: "West1 Z4"
+            west1_zone5: "West1 Z5"
+            west1_zone6: "West1 Z6"
+            west2_zone1: "West2 Z1"
+            west2_zone2: "West2 Z2"
+            west2_zone3: "West2 Z3"
+            west2_zone4: "West2 Z4"
+            west2_zone5: "West2 Z5"
+            west2_zone6: "West2 Z6"
+          offenders: >-
+            {% set ns = namespace(bad=[]) %}
+            {% for key, label in zone_labels.items() %}
+              {% set ov = state_attr('sensor.irrigation_schedule_days', key ~ '_ov') or [] %}
+              {% if ov | length > 0 %}
+                {% set ns.bad = ns.bad + [label ~ ' (' ~ (ov | join(', ')) ~ ')'] %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.bad }}
+      - if:
+          - condition: template
+            value_template: "{{ offenders | length > 0 }}"
+        then:
+          - action: system_log.write
+            data:
+              level: warning
+              message: >-
+                Irrigation grid verification: the programmed schedule exceeds
+                the {{ states('input_number.outside_pump_max_gpm') | round(1) }}
+                GPM pump limit — {{ offenders | join('; ') }}. Zones will still
+                run (no runtime blocking); fix the grid — yellow triangles on
+                the Weekly Pattern show where.
+          - action: persistent_notification.create
+            data:
+              notification_id: irrigation_grid_over_limit
+              title: "⚠️ Schedule grid programs over pump limit"
+              message: >-
+                The weekly grid programs more than
+                {{ states('input_number.outside_pump_max_gpm') | round(1) }} GPM
+                simultaneously: {{ offenders | join('; ') }}. Zones are NOT
+                blocked at runtime (policy 2026-07-27) — fix the overlapping
+                blocks; the Weekly Pattern's yellow triangles show where.
+        else:
+          - action: persistent_notification.dismiss
+            data:
+              notification_id: irrigation_grid_over_limit
+    mode: restart
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# IRRIGATION SCHEDULE DAYS — dashboard day-strip data source
+#
+# Reads per-zone schedule block configuration from .storage/schedule and
+# exposes active days as state attributes for the weekly pattern cards.
+# ─────────────────────────────────────────────────────────────────────────────
+command_line:
+  - sensor:
+      name: "Irrigation Schedule Days"
+      # command template renders live GPM values + pump limit into a JSON
+      # argument on every scan, so the yellow-triangle (over-limit) dots always
+      # reflect current settings
+      command: >-
+        python3 /config/command_line_scripts/irrigation_schedule_days.py
+        '{"pump_max": {{ states('input_number.outside_pump_max_gpm') | float(20) }}, "zone_1": {{ states('input_number.outside_irrigation_zone_1_gpm') | float(0) }}, "zone_2": {{ states('input_number.outside_irrigation_zone_2_gpm') | float(0) }}, "zone_3": {{ states('input_number.outside_irrigation_zone_3_gpm') | float(0) }}, "zone_4": {{ states('input_number.outside_irrigation_zone_4_gpm') | float(0) }}, "zone_5": {{ states('input_number.outside_irrigation_zone_5_gpm') | float(0) }}, "zone_6": {{ states('input_number.outside_irrigation_zone_6_gpm') | float(0) }}, "garden_zone_1": {{ states('input_number.outside_garden_zone_1_gpm') | float(0) }}, "garden_zone_2": {{ states('input_number.outside_garden_zone_2_gpm') | float(0) }}, "garden_zone_3": {{ states('input_number.outside_garden_zone_3_gpm') | float(0) }}, "west1_zone1": {{ states('input_number.outside_west1_zone_1_gpm') | float(0) }}, "west1_zone2": {{ states('input_number.outside_west1_zone_2_gpm') | float(0) }}, "west1_zone3": {{ states('input_number.outside_west1_zone_3_gpm') | float(0) }}, "west1_zone4": {{ states('input_number.outside_west1_zone_4_gpm') | float(0) }}, "west1_zone5": {{ states('input_number.outside_west1_zone_5_gpm') | float(0) }}, "west1_zone6": {{ states('input_number.outside_west1_zone_6_gpm') | float(0) }}, "west2_zone1": {{ states('input_number.outside_west2_zone_1_gpm') | float(0) }}, "west2_zone2": {{ states('input_number.outside_west2_zone_2_gpm') | float(0) }}, "west2_zone3": {{ states('input_number.outside_west2_zone_3_gpm') | float(0) }}, "west2_zone4": {{ states('input_number.outside_west2_zone_4_gpm') | float(0) }}, "west2_zone5": {{ states('input_number.outside_west2_zone_5_gpm') | float(0) }}, "west2_zone6": {{ states('input_number.outside_west2_zone_6_gpm') | float(0) }}}'
+      scan_interval: 60
+      value_template: "ok"
+      json_attributes:
+        # East Irrigation (6 zones)
+        - zone_1
+        - zone_2
+        - zone_3
+        - zone_4
+        - zone_5
+        - zone_6
+        # Garden Controller (3 zones)
+        - garden_zone_1
+        - garden_zone_2
+        - garden_zone_3
+        # West 1 Controller (6 zones)
+        - west1_zone1
+        - west1_zone2
+        - west1_zone3
+        - west1_zone4
+        - west1_zone5
+        - west1_zone6
+        # West 2 Controller (6 zones)
+        - west2_zone1
+        - west2_zone2
+        - west2_zone3
+        - west2_zone4
+        - west2_zone5
+        - west2_zone6
+        # Overlap-day lists (blue dots) — one per zone, added 2026-07-08
+        - zone_1_ol
+        - zone_2_ol
+        - zone_3_ol
+        - zone_4_ol
+        - zone_5_ol
+        - zone_6_ol
+        - garden_zone_1_ol
+        - garden_zone_2_ol
+        - garden_zone_3_ol
+        - west1_zone1_ol
+        - west1_zone2_ol
+        - west1_zone3_ol
+        - west1_zone4_ol
+        - west1_zone5_ol
+        - west1_zone6_ol
+        - west2_zone1_ol
+        - west2_zone2_ol
+        - west2_zone3_ol
+        - west2_zone4_ol
+        - west2_zone5_ol
+        - west2_zone6_ol
+        # Over-pump-limit overlap days (yellow triangles) — added 2026-07-09
+        - zone_1_ov
+        - zone_2_ov
+        - zone_3_ov
+        - zone_4_ov
+        - zone_5_ov
+        - zone_6_ov
+        - garden_zone_1_ov
+        - garden_zone_2_ov
+        - garden_zone_3_ov
+        - west1_zone1_ov
+        - west1_zone2_ov
+        - west1_zone3_ov
+        - west1_zone4_ov
+        - west1_zone5_ov
+        - west1_zone6_ov
+        - west2_zone1_ov
+        - west2_zone2_ov
+        - west2_zone3_ov
+        - west2_zone4_ov
+        - west2_zone5_ov
+        - west2_zone6_ov

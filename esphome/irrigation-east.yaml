@@ -1,0 +1,490 @@
+# Board: ESP32-S3 DevKitC-1 (Espressif)
+# Definition: definitions/boards/esp32-s3-devkitc-1/manifest.yaml
+
+esphome:
+  name: "irrigation-east"
+  friendly_name: Irrigation-east
+
+esp32:
+  variant: esp32s3
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+
+logger:
+
+api:
+  encryption:
+    key: "REPLACE_WITH_YOUR_OWN_32_BYTE_BASE64_KEY"
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: !secret wifi_ssid
+    password: "REPLACE_WITH_YOUR_OWN_AP_PASSWORD"
+
+captive_portal:
+
+# --- Per-zone duration numbers ---
+# HA sets a zone's duration (in minutes) immediately before turning the
+# switch on. The switch's on_turn_on automation reads this value and waits
+# that many minutes before auto-offing. Default 0 means the firmware NEVER
+# runs a zone unless HA explicitly provides a duration — the firmware carries
+# no hardcoded run times.
+#
+# restore_value: false — duration resets to 0 after every reboot. A zone
+# that HA has not yet re-armed after a restart will refuse to open.
+#
+# Expected HA entity IDs (after flashing, verify in Settings → Devices):
+#   number.outside_irrigation_east_zone_1_duration
+#   number.outside_irrigation_east_zone_2_duration
+#   number.outside_irrigation_east_zone_3_duration
+#   number.outside_irrigation_east_zone_4_duration
+#   number.outside_irrigation_east_zone_5_duration
+#   number.outside_irrigation_east_zone_6_duration
+
+number:
+  - platform: template
+    name: "Zone 1 Duration"
+    id: zone1_duration
+    min_value: 0
+    max_value: 240
+    step: 1
+    unit_of_measurement: min
+    initial_value: 0
+    optimistic: true
+    restore_value: false
+
+  - platform: template
+    name: "Zone 2 Duration"
+    id: zone2_duration
+    min_value: 0
+    max_value: 240
+    step: 1
+    unit_of_measurement: min
+    initial_value: 0
+    optimistic: true
+    restore_value: false
+
+  - platform: template
+    name: "Zone 3 Duration"
+    id: zone3_duration
+    min_value: 0
+    max_value: 240
+    step: 1
+    unit_of_measurement: min
+    initial_value: 0
+    optimistic: true
+    restore_value: false
+
+  - platform: template
+    name: "Zone 4 Duration"
+    id: zone4_duration
+    min_value: 0
+    max_value: 240
+    step: 1
+    unit_of_measurement: min
+    initial_value: 0
+    optimistic: true
+    restore_value: false
+
+  - platform: template
+    name: "Zone 5 Duration"
+    id: zone5_duration
+    min_value: 0
+    max_value: 240
+    step: 1
+    unit_of_measurement: min
+    initial_value: 0
+    optimistic: true
+    restore_value: false
+
+  - platform: template
+    name: "Zone 6 Duration"
+    id: zone6_duration
+    min_value: 0
+    max_value: 240
+    step: 1
+    unit_of_measurement: min
+    initial_value: 0
+    optimistic: true
+    restore_value: false
+
+# --- Relay outputs ---
+# All 6 channels are active zones (corrected 2026-06-19 - no spare channel).
+#
+# MAX-2 POLICY (2026-06-23): no strict single-zone interlock. I run up
+# to 2 zones at once to keep the shared property pump near its efficient
+# ~20 GPM operating point. This firmware's job is a dumb hard backstop: never
+# allow more than 2 of THIS controller's zones open simultaneously, regardless
+# of what HA requests. The if: check at the top of each on_turn_on counts the
+# other zones' live states and immediately rejects (turns itself back off) if
+# 2 others are already on.
+#
+# DURATION POLICY: HA sets each zone's duration number before turning the
+# switch on. If that number is 0 (the boot default), the zone is rejected
+# immediately — it will not run. If > 0, the zone runs for exactly that many
+# minutes, then auto-offs. HA may also send an explicit switch.turn_off at
+# any time as a stop signal.
+
+switch:
+  - platform: gpio
+    id: zone1
+    name: "Zone 1 - Front Driveway"
+    pin:
+      number: GPIO1
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - if:
+          condition:
+            lambda: |-
+              int others = 0;
+              if (id(zone2).state) others++;
+              if (id(zone3).state) others++;
+              if (id(zone4).state) others++;
+              if (id(zone5).state) others++;
+              if (id(zone6).state) others++;
+              return others >= 2;
+          then:
+            - switch.turn_off: zone1
+          else:
+            - if:
+                condition:
+                  lambda: 'return id(zone1_duration).state <= 0;'
+                then:
+                  - switch.turn_off: zone1
+                else:
+                  - delay: !lambda 'return (uint32_t)(id(zone1_duration).state * 60000);'
+                  - switch.turn_off: zone1
+
+  - platform: gpio
+    id: zone2
+    name: "Zone 2 - East Property Line"
+    pin:
+      number: GPIO2
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - if:
+          condition:
+            lambda: |-
+              int others = 0;
+              if (id(zone1).state) others++;
+              if (id(zone3).state) others++;
+              if (id(zone4).state) others++;
+              if (id(zone5).state) others++;
+              if (id(zone6).state) others++;
+              return others >= 2;
+          then:
+            - switch.turn_off: zone2
+          else:
+            - if:
+                condition:
+                  lambda: 'return id(zone2_duration).state <= 0;'
+                then:
+                  - switch.turn_off: zone2
+                else:
+                  - delay: !lambda 'return (uint32_t)(id(zone2_duration).state * 60000);'
+                  - switch.turn_off: zone2
+
+  - platform: gpio
+    id: zone3
+    name: "Zone 3 - Driveway East"
+    pin:
+      number: GPIO41
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - if:
+          condition:
+            lambda: |-
+              int others = 0;
+              if (id(zone1).state) others++;
+              if (id(zone2).state) others++;
+              if (id(zone4).state) others++;
+              if (id(zone5).state) others++;
+              if (id(zone6).state) others++;
+              return others >= 2;
+          then:
+            - switch.turn_off: zone3
+          else:
+            - if:
+                condition:
+                  lambda: 'return id(zone3_duration).state <= 0;'
+                then:
+                  - switch.turn_off: zone3
+                else:
+                  - delay: !lambda 'return (uint32_t)(id(zone3_duration).state * 60000);'
+                  - switch.turn_off: zone3
+
+  - platform: gpio
+    id: zone4
+    name: "Zone 4 - Southeast Property Line"
+    pin:
+      number: GPIO42
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - if:
+          condition:
+            lambda: |-
+              int others = 0;
+              if (id(zone1).state) others++;
+              if (id(zone2).state) others++;
+              if (id(zone3).state) others++;
+              if (id(zone5).state) others++;
+              if (id(zone6).state) others++;
+              return others >= 2;
+          then:
+            - switch.turn_off: zone4
+          else:
+            - if:
+                condition:
+                  lambda: 'return id(zone4_duration).state <= 0;'
+                then:
+                  - switch.turn_off: zone4
+                else:
+                  - delay: !lambda 'return (uint32_t)(id(zone4_duration).state * 60000);'
+                  - switch.turn_off: zone4
+
+  - platform: gpio
+    id: zone5
+    name: "Zone 5 - East Side Flower Bed"
+    pin:
+      number: GPIO45
+      ignore_strapping_warning: true   # GPIO45 is a strapping pin; safe to use as relay output
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - if:
+          condition:
+            lambda: |-
+              int others = 0;
+              if (id(zone1).state) others++;
+              if (id(zone2).state) others++;
+              if (id(zone3).state) others++;
+              if (id(zone4).state) others++;
+              if (id(zone6).state) others++;
+              return others >= 2;
+          then:
+            - switch.turn_off: zone5
+          else:
+            - if:
+                condition:
+                  lambda: 'return id(zone5_duration).state <= 0;'
+                then:
+                  - switch.turn_off: zone5
+                else:
+                  - delay: !lambda 'return (uint32_t)(id(zone5_duration).state * 60000);'
+                  - switch.turn_off: zone5
+
+  - platform: gpio
+    id: zone6
+    name: "Zone 6 - East Patio"
+    pin:
+      number: GPIO46
+      ignore_strapping_warning: true   # GPIO46 is a strapping pin; safe to use as relay output
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - if:
+          condition:
+            lambda: |-
+              int others = 0;
+              if (id(zone1).state) others++;
+              if (id(zone2).state) others++;
+              if (id(zone3).state) others++;
+              if (id(zone4).state) others++;
+              if (id(zone5).state) others++;
+              return others >= 2;
+          then:
+            - switch.turn_off: zone6
+          else:
+            - if:
+                condition:
+                  lambda: 'return id(zone6_duration).state <= 0;'
+                then:
+                  - switch.turn_off: zone6
+                else:
+                  - delay: !lambda 'return (uint32_t)(id(zone6_duration).state * 60000);'
+                  - switch.turn_off: zone6
+
+# --- Onboard status RGB LED ---
+# Waveshare ESP32-S3-Relay-6CH(B) onboard addressable (WS2812) RGB LED.
+# Mirrors whichever zone is currently open: blinks N times (N = zone number)
+# followed by a pause, repeating for as long as that zone stays open.
+# Recalculated on every zone on/off - whether triggered by HA, the dashboard,
+# or the auto-off delays above - so it can never go stale.
+#
+# PIN NOTE: GPIO38 confirmed correct by physical test (2026-06-20) - LED
+# lights when driven from HA. Do not change this pin without re-testing.
+# COLOR NOTE: rgb_order is RGB, not the WS2812-standard GRB - this board's
+# chip showed red when commanded pure green under GRB, confirming it's wired/
+# labeled non-standard. Confirmed correct with RGB (2026-06-20).
+light:
+  - platform: esp32_rmt_led_strip
+    id: status_led
+    pin: GPIO38
+    num_leds: 1
+    rgb_order: RGB
+    chipset: WS2812
+    name: "Status LED"
+    restore_mode: ALWAYS_OFF
+    default_transition_length: 0s
+
+globals:
+  - id: rgb_active_mask
+    type: int
+    restore_value: false
+    initial_value: '0'
+    # Bitmask, bit0=zone1 ... bit5=zone6. Replaced the old single "lowest
+    # active zone" int (2026-06-23) once multiple zones could legitimately
+    # be on at once (see the max-2 policy on the switches above) - a single
+    # int could only ever represent one zone, silently hiding any other zone
+    # that was also running.
+
+# DRIVE METHOD NOTE: the blink pattern is driven by a 1s interval poll below,
+# NOT by switch on_turn_on/on_turn_off triggers. An earlier version wired
+# refresh_status_led directly into each zone switch's on_turn_on/on_turn_off,
+# and that crashed the device on every boot - restore_mode: ALWAYS_OFF forces
+# each switch to its off state during the switch's own setup(), which appears
+# to fire the on_turn_off automation synchronously, before the light
+# component's RMT channel had finished initializing. Calling light.turn_off
+# on a not-yet-ready light component triggered a boot failure, which
+# ESPHome's safe_mode watchdog silently rolled back every single time -
+# hence nothing ever appeared to take effect no matter what was changed.
+# Polling via interval: only ever runs after all components have finished
+# setup(), so it sidesteps that ordering hazard entirely.
+# The interval's lambda only touches the light/restarts the blink when the
+# active SET of zones actually CHANGES (compares the new bitmask against the
+# previous value of the global before overwriting it). Without that guard,
+# every 1s tick would force-restart blink_status_led mid-pattern, and the LED
+# would never complete a clean rotation - it would just stutter.
+#
+# NOTE (2026-06-23): this same zoneN.state polling pattern is reused above in
+# each zone's on_turn_on max-2 check - both read live switch states rather
+# than maintaining separate counters, for the same desync-avoidance reason.
+interval:
+  - interval: 1s
+    then:
+      - lambda: |-
+          int new_mask = 0;
+          if (id(zone1).state) new_mask |= 1;
+          if (id(zone2).state) new_mask |= 2;
+          if (id(zone3).state) new_mask |= 4;
+          if (id(zone4).state) new_mask |= 8;
+          if (id(zone5).state) new_mask |= 16;
+          if (id(zone6).state) new_mask |= 32;
+          if (new_mask != id(rgb_active_mask)) {
+            id(rgb_active_mask) = new_mask;
+            id(blink_status_led).stop();
+            id(status_led).turn_off().perform();
+            if (new_mask != 0) {
+              id(blink_status_led).execute();
+            }
+          }
+
+# blink_status_led: cycles through every currently-active zone in turn -
+# blinks zone N's number, short gap, moves to the next active zone, then a
+# longer pause once it's been through all of them, then repeats the whole
+# rotation for as long as rgb_active_mask stays nonzero. With only one zone
+# active this degrades to exactly the old single-zone behavior (blink N,
+# pause, repeat). Only (re)started by the interval above when the active set
+# changes, so a rotation always runs to completion undisturbed.
+script:
+  - id: blink_status_led
+    mode: restart
+    then:
+      - while:
+          condition:
+            lambda: 'return id(rgb_active_mask) != 0;'
+          then:
+            - if:
+                condition:
+                  lambda: 'return id(rgb_active_mask) & 1;'
+                then:
+                  - repeat:
+                      count: 1
+                      then:
+                        - light.turn_on: {id: status_led, brightness: 30%, red: 0.0, green: 1.0, blue: 0.0, transition_length: 0s}
+                        - delay: 250ms
+                        - light.turn_off: {id: status_led, transition_length: 0s}
+                        - delay: 250ms
+                  - delay: 400ms
+            - if:
+                condition:
+                  lambda: 'return id(rgb_active_mask) & 2;'
+                then:
+                  - repeat:
+                      count: 2
+                      then:
+                        - light.turn_on: {id: status_led, brightness: 30%, red: 0.0, green: 1.0, blue: 0.0, transition_length: 0s}
+                        - delay: 250ms
+                        - light.turn_off: {id: status_led, transition_length: 0s}
+                        - delay: 250ms
+                  - delay: 400ms
+            - if:
+                condition:
+                  lambda: 'return id(rgb_active_mask) & 4;'
+                then:
+                  - repeat:
+                      count: 3
+                      then:
+                        - light.turn_on: {id: status_led, brightness: 30%, red: 0.0, green: 1.0, blue: 0.0, transition_length: 0s}
+                        - delay: 250ms
+                        - light.turn_off: {id: status_led, transition_length: 0s}
+                        - delay: 250ms
+                  - delay: 400ms
+            - if:
+                condition:
+                  lambda: 'return id(rgb_active_mask) & 8;'
+                then:
+                  - repeat:
+                      count: 4
+                      then:
+                        - light.turn_on: {id: status_led, brightness: 30%, red: 0.0, green: 1.0, blue: 0.0, transition_length: 0s}
+                        - delay: 250ms
+                        - light.turn_off: {id: status_led, transition_length: 0s}
+                        - delay: 250ms
+                  - delay: 400ms
+            - if:
+                condition:
+                  lambda: 'return id(rgb_active_mask) & 16;'
+                then:
+                  - repeat:
+                      count: 5
+                      then:
+                        - light.turn_on: {id: status_led, brightness: 30%, red: 0.0, green: 1.0, blue: 0.0, transition_length: 0s}
+                        - delay: 250ms
+                        - light.turn_off: {id: status_led, transition_length: 0s}
+                        - delay: 250ms
+                  - delay: 400ms
+            - if:
+                condition:
+                  lambda: 'return id(rgb_active_mask) & 32;'
+                then:
+                  - repeat:
+                      count: 6
+                      then:
+                        - light.turn_on: {id: status_led, brightness: 30%, red: 0.0, green: 1.0, blue: 0.0, transition_length: 0s}
+                        - delay: 250ms
+                        - light.turn_off: {id: status_led, transition_length: 0s}
+                        - delay: 250ms
+                  - delay: 400ms
+            - delay: 700ms
+
+# NOTE: board has a jumper (item 20 in Waveshare's diagram, "Relays default
+# control pin setting") that determines whether GPIO HIGH = relay ON or OFF.
+# Polarity already verified correct (2026-06-19) - no inverted: true needed.
+
+# --- Diagnostics, optional but cheap to have ---
+sensor:
+  - platform: wifi_signal
+    name: "Irrigation East WiFi Signal"
+    update_interval: 60s
+
+  - platform: uptime
+    name: "Irrigation East Uptime"
+
+text_sensor:
+  - platform: version
+    name: "Irrigation East ESPHome Version"

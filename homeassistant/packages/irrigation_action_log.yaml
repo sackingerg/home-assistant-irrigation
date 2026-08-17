@@ -1,0 +1,156 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# IRRIGATION ACTION LOG — rolling history of completed zone runs
+# Package: packages/irrigation_action_log.yaml   (created 2026-07-07)
+#
+# Trigger-based template sensor: fires whenever any of the 21 zone switches
+# goes on → off, computes the actual runtime from the switch's own state
+# timestamps (works for scheduled runs, Run Now, manual toggles, and
+# stop-all — it logs what REALLY happened, not what was configured), and
+# prepends an entry to the `entries` attribute (newest first, last 40 kept).
+#
+# State = timestamp of the most recent entry. Displayed by the markdown
+# "Irrigation Action Log" card on the Zone Config dashboard view.
+# Trigger-based template sensors restore state+attributes across HA
+# restarts, so the log survives reboots.
+# ─────────────────────────────────────────────────────────────────────────────
+template:
+  - triggers:
+      - trigger: event
+        event_type: irrigation_zone_skipped
+      # interlock retry events from scheduling_core's retrying zone start
+      - trigger: event
+        event_type: irrigation_zone_retried
+      - trigger: event
+        event_type: irrigation_zone_rejected
+      # manual "Run Controller" / "Stop All Irrigation" buttons
+      # (packages/irrigation_zone_engine.yaml)
+      - trigger: event
+        event_type: irrigation_controller_run_started
+      - trigger: event
+        event_type: irrigation_controller_run_blocked
+      - trigger: event
+        event_type: irrigation_controller_run_empty
+      - trigger: event
+        event_type: irrigation_stop_all_systems
+      - trigger: state
+        entity_id:
+          - switch.outside_irrigation_east_zone_1_front_driveway
+          - switch.outside_irrigation_east_zone_2_east_property_line
+          - switch.outside_irrigation_east_zone_3_driveway_east
+          - switch.outside_irrigation_east_zone_4_southeast_property_line
+          - switch.outside_irrigation_east_zone_5_east_side_flower_bed
+          - switch.outside_irrigation_east_zone_6_east_patio
+          - switch.outside_irrigation_garden_controller_zone_1_strawberries
+          - switch.outside_irrigation_garden_controller_zone_2_blueberry_blackberry_bed
+          - switch.outside_irrigation_garden_controller_zone_3_dripper_system
+          - switch.outside_irrigation_west1_controller_zone_1_south_center_a
+          - switch.outside_irrigation_west1_controller_zone_2_south_center_b
+          - switch.outside_irrigation_west1_controller_zone_3_south_center_c
+          - switch.outside_irrigation_west1_controller_zone_4_southwest
+          - switch.outside_irrigation_west1_controller_zone_5_west_center
+          - switch.outside_irrigation_west1_controller_zone_6_far_west_edge
+          - switch.outside_irrigation_west2_controller_zone_1_near_shed
+          - switch.outside_irrigation_west2_controller_zone_2_north_of_house
+          - switch.outside_irrigation_west2_controller_zone_3_north_top_edge
+          - switch.outside_irrigation_west2_controller_zone_4_far_west
+          - switch.outside_irrigation_west2_controller_zone_5_station_11
+          - switch.outside_irrigation_west2_controller_zone_6_center_west
+        from: "on"
+        to: "off"
+    sensor:
+      - name: "Outside Irrigation Action Log"
+        unique_id: outside_irrigation_action_log
+        icon: mdi:clipboard-text-clock
+        state: "{{ now().strftime('%Y-%m-%d %H:%M') }}"
+        attributes:
+          entries: >-
+            {% set labels = {
+              'switch.outside_irrigation_east_zone_1_front_driveway':          'East Z1 · Front Driveway',
+              'switch.outside_irrigation_east_zone_2_east_property_line':      'East Z2 · East Property Line',
+              'switch.outside_irrigation_east_zone_3_driveway_east':           'East Z3 · Driveway East',
+              'switch.outside_irrigation_east_zone_4_southeast_property_line': 'East Z4 · Southeast Property Line',
+              'switch.outside_irrigation_east_zone_5_east_side_flower_bed':    'East Z5 · East Side Flower Bed',
+              'switch.outside_irrigation_east_zone_6_east_patio':              'East Z6 · East Patio',
+              'switch.outside_irrigation_garden_controller_zone_1_strawberries':             'Garden Z1 · Strawberries',
+              'switch.outside_irrigation_garden_controller_zone_2_blueberry_blackberry_bed': 'Garden Z2 · Blueberry/Blackberry',
+              'switch.outside_irrigation_garden_controller_zone_3_dripper_system':           'Garden Z3 · Dripper System',
+              'switch.outside_irrigation_west1_controller_zone_1_south_center_a': 'West1 Z1 · South Center A',
+              'switch.outside_irrigation_west1_controller_zone_2_south_center_b': 'West1 Z2 · South Center B',
+              'switch.outside_irrigation_west1_controller_zone_3_south_center_c': 'West1 Z3 · South Center C',
+              'switch.outside_irrigation_west1_controller_zone_4_southwest':      'West1 Z4 · Southwest',
+              'switch.outside_irrigation_west1_controller_zone_5_west_center':    'West1 Z5 · West Center',
+              'switch.outside_irrigation_west1_controller_zone_6_far_west_edge':  'West1 Z6 · Far West Edge',
+              'switch.outside_irrigation_west2_controller_zone_1_near_shed':      'West2 Z1 · Near Shed',
+              'switch.outside_irrigation_west2_controller_zone_2_north_of_house': 'West2 Z2 · North of House',
+              'switch.outside_irrigation_west2_controller_zone_3_north_top_edge': 'West2 Z3 · North Top Edge',
+              'switch.outside_irrigation_west2_controller_zone_4_far_west':       'West2 Z4 · Far West',
+              'switch.outside_irrigation_west2_controller_zone_5_station_11':     'West2 Z5 · Station 11',
+              'switch.outside_irrigation_west2_controller_zone_6_center_west':    'West2 Z6 · Center West',
+            } %}
+            {% set prev = this.attributes.get('entries', []) or [] %}
+            {% if trigger.platform == 'event' %}
+              {% set d = trigger.event.data %}
+              {% if trigger.event.event_type == 'irrigation_zone_skipped' %}
+                {# 🔴 skip entry from the GPM gate #}
+                {% set entry = now().strftime('%b %-d %I:%M %p') ~ '  —  🔴 ' ~
+                     labels.get(d.zone_entity, d.zone_entity) ~ '  —  SKIPPED — schedule programs ' ~
+                     d.scheduled ~ ' GPM > limit ' ~ d.limit ~ ' (this zone ' ~ d.proposed ~ ')' %}
+              {% elif trigger.event.event_type == 'irrigation_zone_retried' %}
+                {# 🟡 zone started after interlock retries — runtime trimmed to stay in block #}
+                {% set entry = now().strftime('%b %-d %I:%M %p') ~ '  —  🟡 ' ~
+                     labels.get(d.zone_entity, d.zone_entity) ~ '  —  interlock retry: started on attempt ' ~
+                     d.attempts ~ ', runtime −' ~ d.trimmed_sec ~ ' s' %}
+              {% elif trigger.event.event_type == 'irrigation_controller_run_started' %}
+                {# 🟢 manual Run Controller cleared the gallon pre-flight #}
+                {% set entry = now().strftime('%b %-d %I:%M %p') ~ '  —  🟢 ' ~
+                     d.label ~ '  —  Run Controller started — ' ~ d.zone_count ~
+                     ' zone' ~ ('s' if d.zone_count | int(0) != 1 else '') ~ ' (' ~
+                     (d.zones | map('regex_replace', ' .*', '') | join('→')) ~
+                     '), peak ' ~ d.peak_gpm ~ ' of ' ~ d.limit ~ ' GPM' %}
+              {% elif trigger.event.event_type == 'irrigation_controller_run_blocked' %}
+                {# 🔴 gallon max pre-flight refused the whole sequence #}
+                {% set entry = now().strftime('%b %-d %I:%M %p') ~ '  —  🔴 ' ~
+                     d.label ~ '  —  Run Controller BLOCKED — ' ~ d.conflict_count ~
+                     ' zone' ~ ('s' if d.conflict_count | int(0) != 1 else '') ~
+                     ' over the ' ~ d.limit ~ ' GPM max (' ~ d.other_gpm ~
+                     ' GPM already flowing): ' ~
+                     (d.conflicts | map('regex_replace', ' —.*', '') | join(', ')) %}
+              {% elif trigger.event.event_type == 'irrigation_controller_run_empty' %}
+                {# ⚪ button pressed with every zone disabled — nothing queued #}
+                {% set entry = now().strftime('%b %-d %I:%M %p') ~ '  —  ⚪ ' ~
+                     d.label ~ '  —  Run Controller — no zones enabled, nothing run' %}
+              {% elif trigger.event.event_type == 'irrigation_stop_all_systems' %}
+                {# 🛑 global Stop All Irrigation button #}
+                {% set entry = now().strftime('%b %-d %I:%M %p') ~ '  —  🛑 ' ~
+                     'STOP ALL IRRIGATION  —  ' ~
+                     (('closed ' ~ d.zone_count ~ ' running zone' ~
+                       ('s' if d.zone_count | int(0) != 1 else '') ~ ' (' ~
+                       (d.zones | join(' • ')) ~ ', ' ~ d.gpm_before ~ ' GPM)')
+                      if d.zone_count | int(0) > 0
+                      else 'nothing was running') %}
+              {% else %}
+                {# 🔴 zone never started — interlock refusal or controller offline;
+                   the event's `cause` field names which (added 2026-07-27) #}
+                {% set entry = now().strftime('%b %-d %I:%M %p') ~ '  —  🔴 ' ~
+                     labels.get(d.zone_entity, d.zone_entity) ~ '  —  DID NOT START — ' ~
+                     d.get('cause', 'max-2-zones interlock') ~ ' (' ~ d.attempts ~ ' attempts)' %}
+              {% endif %}
+            {% else %}
+              {% set secs = (trigger.to_state.last_changed - trigger.from_state.last_changed).total_seconds() %}
+              {% if secs < 5 %}
+                {# firmware refusal flick (shed valve or zone interlock pulse) —
+                   the status sensor / retry events already tell the story #}
+                {% set entry = none %}
+              {% else %}
+                {% if secs >= 90 %}
+                  {% set dur = (secs / 60) | round(0) | int ~ ' min' %}
+                {% elif secs >= 60 %}
+                  {% set dur = (secs / 60) | round(1) ~ ' min' %}
+                {% else %}
+                  {% set dur = secs | round(0) | int ~ ' sec' %}
+                {% endif %}
+                {% set entry = now().strftime('%b %-d %I:%M %p') ~ '  —  ' ~
+                     labels.get(trigger.entity_id, trigger.entity_id) ~ '  —  ran ' ~ dur %}
+              {% endif %}
+            {% endif %}
+            {{ (([entry] if entry else []) + (prev | list))[:40] }}

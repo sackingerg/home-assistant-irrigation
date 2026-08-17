@@ -1,0 +1,733 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# IRRIGATION ZONE ENGINE — the one implementation, for all four controllers
+# File: packages/irrigation_zone_engine.yaml
+#   created 2026-08-10 · absorbed irrigation_manual_control.yaml 2026-08-11
+#
+# Deploy to: /config/packages/irrigation_zone_engine.yaml
+#
+# WHY THIS FILE EXISTS
+# ─────────────────────────────────────────────────────────────────────────────
+# Until 2026-08-10 each controller had its own copy of the same three scripts —
+# <sys>_run_single_zone, <sys>_stop_all, <sys>_sequential_run. Twelve scripts,
+# four near-identical implementations, and they had silently drifted apart.
+#
+# That drift caused a real bug. West 1 and West 2's run_single_zone ended with
+# an UNCONDITIONAL switch.turn_off after a plain `delay`; East and Garden did
+# not. Because the script is mode: parallel, every "Run Now" press armed an
+# independent "close this valve in N minutes" that outlived its own run. On
+# 2026-08-10 four presses on West 2 Zone 1 produced this:
+#
+#     15:24:13 ON              15:24:21 OFF  (stopped by hand, 8 s)
+#     15:28:11 ON              15:39:13 OFF  ← press 1's delay, 15:24:13 + 15:00
+#     15:39:38 ON              15:43:11 OFF  ← press 2's delay, 15:28:11 + 15:00
+#     15:43:54 ON              15:54:38 OFF  ← press 3's delay, 15:39:38 + 15:00
+#
+# The last run was cut to 10 min 44 s against a 15 min setting. Every OFF landed
+# exactly 15:00 after an EARLIER press. The firmware, the duration slider and
+# the action log were all correct; the duplicated HA script was not.
+#
+# So: ONE implementation, parameterised by controller. Adding a fifth controller
+# means adding registry rows, not another copy of the logic.
+#
+# THE FIX ITSELF — why there is no blind turn_off any more
+# ─────────────────────────────────────────────────────────────────────────────
+# irrigation_run_zone does not sleep for the duration and then close the valve.
+# It WAITS for the valve to close — by firmware auto-off, by the Stop button, or
+# by a stop-all — and only intervenes if the wait times out with the valve still
+# open. An instance whose run ended early exits cleanly instead of leaving a
+# delayed shutoff behind. The backstop is kept and made LOUD: a firmware that
+# fails to auto-off is a real fault worth seeing.
+#
+# STOP SEMANTICS
+# ─────────────────────────────────────────────────────────────────────────────
+# Stop, at every level, does the same three things to each zone it touches:
+#     1. close the valve                    (switch.turn_off)
+#     2. cancel the countdown               (timer.cancel → idle)
+#     3. zero the controller's duration     (number.set_value 0)
+# Zeroing (3) matters: the firmware refuses to open a zone whose duration is 0,
+# so a stopped zone cannot be reopened by a stray command until HA re-arms it.
+#
+#     irrigation_stop_zone        one zone
+#     irrigation_stop_controller  every zone on one controller, + its sequence
+#     irrigation_stop_all_systems every zone on all four controllers
+#
+# A running irrigation_run_zone instance needs no separate kill: closing the
+# valve satisfies its wait, and it exits on its own.
+#
+# GALLON-MAX PRE-FLIGHT  (irrigation_run_controller)
+# ─────────────────────────────────────────────────────────────────────────────
+# Run Controller never opens a valve until it has priced the whole sequence
+# against the pump budget. The sequencer opens exactly ONE zone at a time, so
+# the projected load for any step is:
+#
+#     (GPM already flowing on the OTHER controllers) + (this zone's GPM)
+#
+# Any enabled zone over input_number.outside_pump_max_gpm is a CONFLICT. Per the
+# "surface problems, don't silently enforce" rule the block is loud and specific
+# — it names every conflicting zone, its GPM, and the total it would have hit —
+# via a persistent notification (dismiss = the OK button), a system-log warning,
+# and an Irrigation Action Log entry. The sequence then does NOT run.
+#
+# A "Run Now" already in flight on the SAME controller is deliberately not in
+# the baseline: the zone this sequence is about to open is what we are pricing.
+#
+# NO PHONE PUSH, ANYWHERE. Watering runs at night with my phone silent, so a
+# push can never reach me. Problems surface through persistent notifications,
+# the system log, the Action Log, and the per-controller status text.
+#
+# VARIABLE STYLE
+# ─────────────────────────────────────────────────────────────────────────────
+# Every script declares ALL of its variables in one top-level `variables:` block
+# before its `sequence:`, never mid-sequence. Keys render in order, so a later
+# key may reference an earlier one. Anything derived from a zone row is written
+# defensively (`if z else …`) so an unknown system/zone key still renders and is
+# caught by the guard at the top of the sequence rather than erroring halfway
+# through with a valve possibly open.
+#
+# ONBOARDING A NEW ZONE
+# ─────────────────────────────────────────────────────────────────────────────
+# Add one row to zone_registry and one entry to that system's list in
+# sys_zone_numbers. Nothing else in this file changes.
+#
+# ONBOARDING A NEW CONTROLLER
+# ─────────────────────────────────────────────────────────────────────────────
+# Add its rows to zone_registry and an entry to sys_zone_numbers, sys_status,
+# sys_label and sys_gpm_sensor. No new script.
+#
+# EVENTS FIRED  (consumed by packages/irrigation_action_log.yaml)
+# ─────────────────────────────────────────────────────────────────────────────
+#   irrigation_controller_run_started   sequence handed off to the runner
+#   irrigation_controller_run_blocked   gallon max exceeded — did not run
+#   irrigation_controller_run_empty     no zones enabled — nothing to run
+#   irrigation_stop_all_systems         global stop pressed
+# ─────────────────────────────────────────────────────────────────────────────
+
+script:
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # irrigation_run_zone — open one zone for a set number of minutes
+  #
+  # The ONLY script that opens a valve. The schedule reactor, the Run Now
+  # buttons, the zone-map dots and the sequential runner all come here.
+  # ═══════════════════════════════════════════════════════════════════════════
+  irrigation_run_zone:
+    alias: "Irrigation — Run Zone"
+    icon: mdi:water
+    mode: parallel
+    max: 21
+    description: >-
+      Runs one zone on one controller for its Run Now duration, or for an
+      explicit run_minutes override. Arms the controller's duration number,
+      opens the valve, then waits for the valve to close rather than closing it
+      on a timer — so a run that ends early never leaves a delayed shutoff
+      behind to cut short a later run.
+    fields:
+      system:
+        description: "Controller key: east | garden | west1 | west2"
+        required: true
+        example: west2
+        selector:
+          select:
+            options: [east, garden, west1, west2]
+      zone:
+        description: "Zone number on that controller"
+        required: true
+        example: 1
+        selector:
+          number:
+            min: 1
+            max: 6
+      run_minutes:
+        description: >-
+          Optional runtime override in minutes, may be fractional. The schedule
+          reactor passes the remaining block time. Omit for manual runs, which
+          use the zone's Run Now duration.
+        required: false
+
+    # ── ALL VARIABLES, DECLARED UP FRONT ──────────────────────────────────────
+    # The shared tables are defined here once, with YAML anchors, and aliased
+    # into every other script below — so all four controllers are driven by the
+    # same table and there is exactly one copy of it in the file.
+    variables:
+      zone_registry: &zone_registry
+        # ── East ──
+        "east:1":   {switch: switch.outside_irrigation_east_zone_1_front_driveway,          duration: input_number.outside_irrigation_zone_1_duration, timer: timer.outside_irrigation_zone_1_timer, device: number.outside_irrigation_east_zone_1_duration, enable: input_boolean.outside_irrigation_zone_1_enabled, gpm: input_number.outside_irrigation_zone_1_gpm, label: "Z1 · Front Driveway"}
+        "east:2":   {switch: switch.outside_irrigation_east_zone_2_east_property_line,      duration: input_number.outside_irrigation_zone_2_duration, timer: timer.outside_irrigation_zone_2_timer, device: number.outside_irrigation_east_zone_2_duration, enable: input_boolean.outside_irrigation_zone_2_enabled, gpm: input_number.outside_irrigation_zone_2_gpm, label: "Z2 · East Property Line"}
+        "east:3":   {switch: switch.outside_irrigation_east_zone_3_driveway_east,           duration: input_number.outside_irrigation_zone_3_duration, timer: timer.outside_irrigation_zone_3_timer, device: number.outside_irrigation_east_zone_3_duration, enable: input_boolean.outside_irrigation_zone_3_enabled, gpm: input_number.outside_irrigation_zone_3_gpm, label: "Z3 · Driveway East"}
+        "east:4":   {switch: switch.outside_irrigation_east_zone_4_southeast_property_line, duration: input_number.outside_irrigation_zone_4_duration, timer: timer.outside_irrigation_zone_4_timer, device: number.outside_irrigation_east_zone_4_duration, enable: input_boolean.outside_irrigation_zone_4_enabled, gpm: input_number.outside_irrigation_zone_4_gpm, label: "Z4 · Southeast Property Line"}
+        "east:5":   {switch: switch.outside_irrigation_east_zone_5_east_side_flower_bed,    duration: input_number.outside_irrigation_zone_5_duration, timer: timer.outside_irrigation_zone_5_timer, device: number.outside_irrigation_east_zone_5_duration, enable: input_boolean.outside_irrigation_zone_5_enabled, gpm: input_number.outside_irrigation_zone_5_gpm, label: "Z5 · East Side Flower Bed"}
+        "east:6":   {switch: switch.outside_irrigation_east_zone_6_east_patio,              duration: input_number.outside_irrigation_zone_6_duration, timer: timer.outside_irrigation_zone_6_timer, device: number.outside_irrigation_east_zone_6_duration, enable: input_boolean.outside_irrigation_zone_6_enabled, gpm: input_number.outside_irrigation_zone_6_gpm, label: "Z6 · East Patio"}
+        # ── Garden ──
+        "garden:1": {switch: switch.outside_irrigation_garden_controller_zone_1_strawberries,             duration: input_number.outside_garden_zone_1_duration, timer: timer.outside_garden_zone_1_timer, device: number.outside_irrigation_garden_controller_zone_1_duration, enable: input_boolean.outside_garden_zone_1_enabled, gpm: input_number.outside_garden_zone_1_gpm, label: "Z1 · Strawberries"}
+        "garden:2": {switch: switch.outside_irrigation_garden_controller_zone_2_blueberry_blackberry_bed, duration: input_number.outside_garden_zone_2_duration, timer: timer.outside_garden_zone_2_timer, device: number.outside_irrigation_garden_controller_zone_2_duration, enable: input_boolean.outside_garden_zone_2_enabled, gpm: input_number.outside_garden_zone_2_gpm, label: "Z2 · Blueberry/Blackberry"}
+        "garden:3": {switch: switch.outside_irrigation_garden_controller_zone_3_dripper_system,           duration: input_number.outside_garden_zone_3_duration, timer: timer.outside_garden_zone_3_timer, device: number.outside_irrigation_garden_controller_zone_3_duration, enable: input_boolean.outside_garden_zone_3_enabled, gpm: input_number.outside_garden_zone_3_gpm, label: "Z3 · Dripper System"}
+        # ── West 1 ──
+        "west1:1":  {switch: switch.outside_irrigation_west1_controller_zone_1_south_center_a, duration: input_number.outside_west1_zone_1_duration, timer: timer.outside_west1_zone_1_timer, device: number.outside_irrigation_west1_controller_zone_1_duration, enable: input_boolean.outside_west1_zone_1_enabled, gpm: input_number.outside_west1_zone_1_gpm, label: "Z1 · South Center A"}
+        "west1:2":  {switch: switch.outside_irrigation_west1_controller_zone_2_south_center_b, duration: input_number.outside_west1_zone_2_duration, timer: timer.outside_west1_zone_2_timer, device: number.outside_irrigation_west1_controller_zone_2_duration, enable: input_boolean.outside_west1_zone_2_enabled, gpm: input_number.outside_west1_zone_2_gpm, label: "Z2 · South Center B"}
+        "west1:3":  {switch: switch.outside_irrigation_west1_controller_zone_3_south_center_c, duration: input_number.outside_west1_zone_3_duration, timer: timer.outside_west1_zone_3_timer, device: number.outside_irrigation_west1_controller_zone_3_duration, enable: input_boolean.outside_west1_zone_3_enabled, gpm: input_number.outside_west1_zone_3_gpm, label: "Z3 · South Center C"}
+        "west1:4":  {switch: switch.outside_irrigation_west1_controller_zone_4_southwest,      duration: input_number.outside_west1_zone_4_duration, timer: timer.outside_west1_zone_4_timer, device: number.outside_irrigation_west1_controller_zone_4_duration, enable: input_boolean.outside_west1_zone_4_enabled, gpm: input_number.outside_west1_zone_4_gpm, label: "Z4 · Southwest"}
+        "west1:5":  {switch: switch.outside_irrigation_west1_controller_zone_5_west_center,    duration: input_number.outside_west1_zone_5_duration, timer: timer.outside_west1_zone_5_timer, device: number.outside_irrigation_west1_controller_zone_5_duration, enable: input_boolean.outside_west1_zone_5_enabled, gpm: input_number.outside_west1_zone_5_gpm, label: "Z5 · West Center"}
+        "west1:6":  {switch: switch.outside_irrigation_west1_controller_zone_6_far_west_edge,  duration: input_number.outside_west1_zone_6_duration, timer: timer.outside_west1_zone_6_timer, device: number.outside_irrigation_west1_controller_zone_6_duration, enable: input_boolean.outside_west1_zone_6_enabled, gpm: input_number.outside_west1_zone_6_gpm, label: "Z6 · Far West Edge"}
+        # ── West 2 ──
+        "west2:1":  {switch: switch.outside_irrigation_west2_controller_zone_1_near_shed,      duration: input_number.outside_west2_zone_1_duration, timer: timer.outside_west2_zone_1_timer, device: number.outside_irrigation_west2_controller_zone_1_duration, enable: input_boolean.outside_west2_zone_1_enabled, gpm: input_number.outside_west2_zone_1_gpm, label: "Z1 · Near Shed"}
+        "west2:2":  {switch: switch.outside_irrigation_west2_controller_zone_2_north_of_house, duration: input_number.outside_west2_zone_2_duration, timer: timer.outside_west2_zone_2_timer, device: number.outside_irrigation_west2_controller_zone_2_duration, enable: input_boolean.outside_west2_zone_2_enabled, gpm: input_number.outside_west2_zone_2_gpm, label: "Z2 · North of House"}
+        "west2:3":  {switch: switch.outside_irrigation_west2_controller_zone_3_north_top_edge, duration: input_number.outside_west2_zone_3_duration, timer: timer.outside_west2_zone_3_timer, device: number.outside_irrigation_west2_controller_zone_3_duration, enable: input_boolean.outside_west2_zone_3_enabled, gpm: input_number.outside_west2_zone_3_gpm, label: "Z3 · North Top Edge"}
+        "west2:4":  {switch: switch.outside_irrigation_west2_controller_zone_4_far_west,       duration: input_number.outside_west2_zone_4_duration, timer: timer.outside_west2_zone_4_timer, device: number.outside_irrigation_west2_controller_zone_4_duration, enable: input_boolean.outside_west2_zone_4_enabled, gpm: input_number.outside_west2_zone_4_gpm, label: "Z4 · Far West"}
+        "west2:5":  {switch: switch.outside_irrigation_west2_controller_zone_5_station_11,     duration: input_number.outside_west2_zone_5_duration, timer: timer.outside_west2_zone_5_timer, device: number.outside_irrigation_west2_controller_zone_5_duration, enable: input_boolean.outside_west2_zone_5_enabled, gpm: input_number.outside_west2_zone_5_gpm, label: "Z5 · Station 11"}
+        "west2:6":  {switch: switch.outside_irrigation_west2_controller_zone_6_center_west,    duration: input_number.outside_west2_zone_6_duration, timer: timer.outside_west2_zone_6_timer, device: number.outside_irrigation_west2_controller_zone_6_duration, enable: input_boolean.outside_west2_zone_6_enabled, gpm: input_number.outside_west2_zone_6_gpm, label: "Z6 · Center West"}
+
+      sys_status: &sys_status
+        east: input_text.outside_irrigation_status
+        garden: input_text.outside_garden_status
+        west1: input_text.outside_west1_status
+        west2: input_text.outside_west2_status
+
+      sys_label: &sys_label
+        east: "Irrigation East"
+        garden: "Garden"
+        west1: "Irrigation West 1"
+        west2: "Irrigation West 2"
+
+      sys_zone_numbers: &sys_zone_numbers
+        east: [1, 2, 3, 4, 5, 6]
+        garden: [1, 2, 3]
+        west1: [1, 2, 3, 4, 5, 6]
+        west2: [1, 2, 3, 4, 5, 6]
+
+      sys_gpm_sensor: &sys_gpm_sensor
+        east: sensor.outside_irrigation_east_gpm
+        garden: sensor.outside_irrigation_garden_gpm
+        west1: sensor.outside_irrigation_west1_gpm
+        west2: sensor.outside_irrigation_west2_gpm
+
+      z: "{{ zone_registry.get(system ~ ':' ~ zone) }}"
+      status_entity: "{{ sys_status.get(system) }}"
+      # Defensive: an unknown key must still render here so the guard below can
+      # report it, rather than raising mid-sequence with a valve possibly open.
+      dur_min: >-
+        {% if z is none %}0
+        {% else %}
+        {% set o = run_minutes | default(0) | float(0) %}
+        {{ o if o > 0 else states(z.duration) | int(5) }}
+        {% endif %}
+
+    sequence:
+      - if:
+          - condition: template
+            value_template: "{{ z is none or status_entity is none }}"
+        then:
+          - action: system_log.write
+            data:
+              level: error
+              logger: irrigation.run_zone
+              message: >-
+                irrigation_run_zone called with unknown zone "{{ system }}:{{ zone }}"
+                — nothing was run. Check the caller against zone_registry.
+          - stop: "Unknown zone key"
+
+      - action: input_text.set_value
+        target:
+          entity_id: "{{ status_entity }}"
+        data:
+          value: "{{ z.label }} running ({{ dur_min | float(5) | round(1) }} min)"
+
+      - action: timer.start
+        target:
+          entity_id: "{{ z.timer }}"
+        data:
+          duration: "{{ (dur_min | float(5) * 60) | int }}"
+
+      # Arm the firmware. It refuses to open a zone whose duration is 0, and it
+      # owns the shutoff from here on.
+      - if:
+          - condition: template
+            value_template: "{{ states(z.device) not in ['unknown', 'unavailable'] }}"
+        then:
+          - action: number.set_value
+            target:
+              entity_id: "{{ z.device }}"
+            data:
+              value: "{{ dur_min | float(5) }}"
+
+      - action: switch.turn_on
+        target:
+          entity_id: "{{ z.switch }}"
+
+      # Let the state settle so a firmware interlock rejection (which pulses the
+      # switch on→off within a second) is visible to the wait below rather than
+      # racing it.
+      - delay:
+          seconds: 2
+
+      # THE FIX. Wait for the valve to close instead of scheduling a close.
+      # wait_template, not wait_for_trigger: if the firmware already rejected
+      # the start, the condition is true immediately and this exits at once
+      # instead of hanging until the timeout.
+      - wait_template: "{{ is_state(z.switch, 'off') }}"
+        timeout:
+          seconds: "{{ (dur_min | float(5) * 60 + 45) | int }}"
+        continue_on_timeout: true
+
+      # Backstop — only reached if the firmware did NOT close the valve on time.
+      # That is a genuine fault: say so.
+      - if:
+          - condition: template
+            value_template: "{{ is_state(z.switch, 'on') }}"
+        then:
+          - action: system_log.write
+            data:
+              level: warning
+              logger: irrigation.run_zone
+              message: >-
+                {{ sys_label.get(system) }} {{ z.label }} did not auto-off after
+                {{ dur_min }} min — HA closed the valve as a backstop. The
+                controller's firmware timer may not be working.
+          - action: switch.turn_off
+            target:
+              entity_id: "{{ z.switch }}"
+          - action: persistent_notification.create
+            data:
+              notification_id: "irrigation_no_autooff_{{ system }}_{{ zone }}"
+              title: "⚠️ Zone did not auto-off"
+              message: |-
+                **{{ sys_label.get(system) }} — {{ z.label }}** was still open
+                {{ dur_min }} minutes after it started. Home Assistant closed the
+                valve as a backstop.
+
+                The ESP32 is supposed to close it without being told. Check that
+                controller's firmware and its duration number.
+
+      - action: timer.cancel
+        target:
+          entity_id: "{{ z.timer }}"
+
+      # Report what is actually running on this controller now, not what this
+      # instance was doing — another zone may still be open.
+      - action: input_text.set_value
+        target:
+          entity_id: "{{ status_entity }}"
+        data:
+          value: >-
+            {% set ns = namespace(on=[]) %}
+            {% for n in sys_zone_numbers.get(system, []) %}
+              {% set zz = zone_registry.get(system ~ ':' ~ n) %}
+              {% if zz is not none and is_state(zz.switch, 'on') %}
+                {% set ns.on = ns.on + [ 'Z' ~ n ] %}
+              {% endif %}
+            {% endfor %}
+            {% if ns.on | count > 0 %}{{ ns.on | join(', ') }} running
+            {% else %}Idle — last ran {{ z.label }}{% endif %}
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # irrigation_stop_zone — close one zone
+  # ═══════════════════════════════════════════════════════════════════════════
+  irrigation_stop_zone:
+    alias: "Irrigation — Stop Zone"
+    icon: mdi:stop
+    mode: parallel
+    max: 21
+    description: >-
+      Closes one zone's valve, cancels its countdown, and zeroes its controller
+      duration so the firmware will refuse to reopen it until HA re-arms it. Any
+      irrigation_run_zone instance for this zone ends by itself once the valve
+      closes.
+    fields:
+      system:
+        description: "Controller key: east | garden | west1 | west2"
+        required: true
+        selector:
+          select:
+            options: [east, garden, west1, west2]
+      zone:
+        description: "Zone number on that controller"
+        required: true
+
+    variables:
+      zone_registry: *zone_registry
+      sys_status: *sys_status
+      z: "{{ zone_registry.get(system ~ ':' ~ zone) }}"
+      status_entity: "{{ sys_status.get(system) }}"
+
+    sequence:
+      - if:
+          - condition: template
+            value_template: "{{ z is none }}"
+        then:
+          - stop: "Unknown zone key"
+
+      - action: switch.turn_off
+        target:
+          entity_id: "{{ z.switch }}"
+      - action: timer.cancel
+        target:
+          entity_id: "{{ z.timer }}"
+      - if:
+          - condition: template
+            value_template: "{{ states(z.device) not in ['unknown', 'unavailable'] }}"
+        then:
+          - action: number.set_value
+            target:
+              entity_id: "{{ z.device }}"
+            data:
+              value: 0
+      - action: input_text.set_value
+        target:
+          entity_id: "{{ status_entity }}"
+        data:
+          value: "Stopped — {{ z.label }}"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # irrigation_stop_controller — close every zone on one controller
+  #
+  # NOTE: script.turn_off stops ALL running irrigation_sequential_run instances,
+  # not just this controller's. In practice only one manual sequence runs at a
+  # time, and stopping too much is the safe direction for a stop button.
+  # ═══════════════════════════════════════════════════════════════════════════
+  irrigation_stop_controller:
+    alias: "Irrigation — Stop Controller"
+    icon: mdi:stop-circle
+    mode: parallel
+    max: 4
+    description: >-
+      Closes every valve on one controller, cancels its countdowns and zeroes its
+      duration numbers. Also halts any sequential run in progress.
+    fields:
+      system:
+        description: "Controller key: east | garden | west1 | west2"
+        required: true
+        selector:
+          select:
+            options: [east, garden, west1, west2]
+
+    variables:
+      zone_registry: *zone_registry
+      sys_status: *sys_status
+      sys_zone_numbers: *sys_zone_numbers
+      status_entity: "{{ sys_status.get(system) }}"
+      zone_numbers: "{{ sys_zone_numbers.get(system, []) }}"
+
+    sequence:
+      - action: script.turn_off
+        target:
+          entity_id: script.irrigation_sequential_run
+
+      - repeat:
+          for_each: "{{ zone_numbers }}"
+          sequence:
+            # repeat.item does not exist until the loop runs, so this one
+            # lookup cannot be hoisted to the top with the rest.
+            - variables:
+                z: "{{ zone_registry.get(system ~ ':' ~ repeat.item) }}"
+            - if:
+                - condition: template
+                  value_template: "{{ z is not none }}"
+              then:
+                - action: switch.turn_off
+                  target:
+                    entity_id: "{{ z.switch }}"
+                - action: timer.cancel
+                  target:
+                    entity_id: "{{ z.timer }}"
+                - if:
+                    - condition: template
+                      value_template: "{{ states(z.device) not in ['unknown', 'unavailable'] }}"
+                  then:
+                    - action: number.set_value
+                      target:
+                        entity_id: "{{ z.device }}"
+                      data:
+                        value: 0
+
+      - if:
+          - condition: template
+            value_template: "{{ status_entity is not none }}"
+        then:
+          - action: input_text.set_value
+            target:
+              entity_id: "{{ status_entity }}"
+            data:
+              value: "Stopped — all zones off"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # irrigation_sequential_run — one controller's enabled zones, in order
+  #
+  # MANUAL ONLY. The schedule reactor drives zones individually; it does not
+  # call this. Reached from the "Run Controller" button via
+  # script.irrigation_run_controller, which gallon-checks the sequence first.
+  # ═══════════════════════════════════════════════════════════════════════════
+  irrigation_sequential_run:
+    alias: "Irrigation — Sequential Run"
+    icon: mdi:water-sync
+    mode: parallel
+    max: 4
+    description: >-
+      Runs the enabled zones of one controller in numerical order, each for its
+      own Run Now duration, waiting for each valve to close before opening the
+      next. Disabled zones are skipped.
+    fields:
+      system:
+        description: "Controller key: east | garden | west1 | west2"
+        required: true
+        selector:
+          select:
+            options: [east, garden, west1, west2]
+
+    variables:
+      zone_registry: *zone_registry
+      sys_status: *sys_status
+      sys_zone_numbers: *sys_zone_numbers
+      status_entity: "{{ sys_status.get(system) }}"
+      # Resolve the enabled list ONCE, up front, instead of testing each zone
+      # inside the loop — the loop then has no conditional logic at all.
+      enabled_zones: >-
+        {% set ns = namespace(z=[]) %}
+        {% for n in sys_zone_numbers.get(system, []) %}
+          {% set zz = zone_registry.get(system ~ ':' ~ n) %}
+          {% if zz is not none and is_state(zz.enable, 'on') %}
+            {% set ns.z = ns.z + [ n ] %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.z }}
+
+    sequence:
+      - repeat:
+          for_each: "{{ enabled_zones }}"
+          sequence:
+            # irrigation_run_zone returns only when the valve has closed, so
+            # this is the sequencing mechanism — no extra waiting needed.
+            - action: script.irrigation_run_zone
+              data:
+                system: "{{ system }}"
+                zone: "{{ repeat.item }}"
+
+      - if:
+          - condition: template
+            value_template: "{{ status_entity is not none }}"
+        then:
+          - action: input_text.set_value
+            target:
+              entity_id: "{{ status_entity }}"
+            data:
+              value: "Sequential run complete ✓"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # irrigation_run_controller — "Run Controller" button
+  # Gallon pre-flight, then hand off to the sequencer.
+  #
+  # mode: parallel (max 4) — one controller's sequence must never block another
+  # controller's button press.
+  # ═══════════════════════════════════════════════════════════════════════════
+  irrigation_run_controller:
+    alias: "Irrigation — Run Controller"
+    icon: mdi:play-box-multiple
+    mode: parallel
+    max: 4
+    description: >-
+      Runs every enabled zone on one controller in numerical order, each for its
+      own Run Now duration. Pre-flights the pump gallon budget first and refuses
+      to run — loudly, naming the conflicting zones — if any enabled zone would
+      push the pump over its maximum.
+    fields:
+      system:
+        description: "Which controller to run"
+        required: true
+        example: west1
+        selector:
+          select:
+            options: [east, garden, west1, west2]
+
+    variables:
+      zone_registry: *zone_registry
+      sys_status: *sys_status
+      sys_label: *sys_label
+      sys_zone_numbers: *sys_zone_numbers
+      sys_gpm_sensor: *sys_gpm_sensor
+      label: "{{ sys_label.get(system, system) }}"
+      status_entity: "{{ sys_status.get(system) }}"
+      limit: "{{ states('input_number.outside_pump_max_gpm') | float(20) }}"
+      # Load already flowing on the OTHER controllers. Never negative. An
+      # unknown system contributes 0, which can only make the check stricter.
+      other_gpm: >-
+        {% set s = sys_gpm_sensor.get(system) %}
+        {{ [ (states('sensor.outside_irrigation_total_gpm') | float(0))
+             - (states(s) | float(0) if s else 0),
+             0 ] | max }}
+      enabled_zones: >-
+        {% set ns = namespace(z=[]) %}
+        {% for n in sys_zone_numbers.get(system, []) %}
+          {% set zz = zone_registry.get(system ~ ':' ~ n) %}
+          {% if zz is not none and is_state(zz.enable, 'on') %}
+            {% set ns.z = ns.z + [ n ] %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.z }}
+      enabled_labels: >-
+        {% set ns = namespace(l=[]) %}
+        {% for n in enabled_zones %}
+          {% set ns.l = ns.l + [ zone_registry[system ~ ':' ~ n].label ] %}
+        {% endfor %}
+        {{ ns.l }}
+      # Each entry: "Z4 · Southwest — 11.5 GPM (would total 24.0, limit 20.0)"
+      conflicts: >-
+        {% set ns = namespace(bad=[]) %}
+        {% for n in enabled_zones %}
+          {% set zz = zone_registry[system ~ ':' ~ n] %}
+          {% set zg = states(zz.gpm) | float(0) %}
+          {% set projected = other_gpm + zg %}
+          {% if projected > limit %}
+            {% set ns.bad = ns.bad + [
+                 zz.label ~ ' — ' ~ (zg | round(1)) ~ ' GPM (would total ' ~
+                 (projected | round(1)) ~ ', limit ' ~ (limit | round(1)) ~ ')' ] %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.bad }}
+      peak_gpm: >-
+        {% set ns = namespace(p=0) %}
+        {% for n in enabled_zones %}
+          {% set ns.p = [ ns.p, other_gpm + (states(zone_registry[system ~ ':' ~ n].gpm) | float(0)) ] | max %}
+        {% endfor %}
+        {{ ns.p | round(1) }}
+
+    sequence:
+      - choose:
+
+          # ── Nothing enabled — say so instead of silently doing nothing ────
+          - conditions:
+              - condition: template
+                value_template: "{{ enabled_zones | count == 0 }}"
+            sequence:
+              - event: irrigation_controller_run_empty
+                event_data:
+                  system: "{{ system }}"
+                  label: "{{ label }}"
+              - action: persistent_notification.create
+                data:
+                  notification_id: "irrigation_run_controller_{{ system }}"
+                  title: "🚫 {{ label }} — nothing to run"
+                  # literal block (|-), not folded (>-): folding collapses the
+                  # markdown line breaks into one run-on line.
+                  message: |-
+                    **Run Controller did not start.**
+
+                    No zones on this controller are enabled, so the sequence has no steps.
+
+                    Switch "Schedule Enabled" on for the zones you want included, then press **Run Controller** again.
+              - stop: "No enabled zones on this controller"
+
+          # ── Over the gallon budget — name the conflicts, run nothing ──────
+          - conditions:
+              - condition: template
+                value_template: "{{ conflicts | count > 0 }}"
+            sequence:
+              - event: irrigation_controller_run_blocked
+                event_data:
+                  system: "{{ system }}"
+                  label: "{{ label }}"
+                  limit: "{{ limit | round(1) }}"
+                  other_gpm: "{{ other_gpm | round(1) }}"
+                  conflict_count: "{{ conflicts | count }}"
+                  conflicts: "{{ conflicts }}"
+              - action: system_log.write
+                data:
+                  level: warning
+                  logger: irrigation.run_controller
+                  message: >-
+                    {{ label }} Run Controller BLOCKED — pump max
+                    {{ limit | round(1) }} GPM, {{ other_gpm | round(1) }} GPM already
+                    flowing elsewhere. Over-budget zones: {{ conflicts | join(' | ') }}
+              - action: persistent_notification.create
+                data:
+                  notification_id: "irrigation_run_controller_{{ system }}"
+                  title: "🔴 {{ label }} — over gallon max, did NOT run"
+                  message: |-
+                    **The sequence was not started. No valve was opened.**
+
+                    Pump maximum is **{{ limit | round(1) }} GPM**.
+                    {% if other_gpm > 0 %}**{{ other_gpm | round(1) }} GPM** is already flowing on other controllers ({{ state_attr('sensor.outside_irrigation_total_gpm', 'zones') | default([], true) | selectattr('on') | map(attribute='name') | join(' • ') }}).{% else %}Nothing else is running right now.{% endif %}
+
+                    **{{ conflicts | count }} zone{{ 's' if conflicts | count > 1 }} in conflict:**
+
+                    {% for c in conflicts %}
+                    - 🔴 {{ c }}
+                    {% endfor %}
+
+                    Lower the zone's GPM figure, wait for the other controllers to finish, raise the pump maximum, or disable the conflicting zone — then press **Run Controller** again.
+
+                    Press **OK** below to dismiss this notice.
+              - stop: "Blocked by gallon max pre-flight"
+
+        # ── Cleared the budget — hand off to the sequencer ──────────────────
+        default:
+          - action: persistent_notification.dismiss
+            data:
+              notification_id: "irrigation_run_controller_{{ system }}"
+          - event: irrigation_controller_run_started
+            event_data:
+              system: "{{ system }}"
+              label: "{{ label }}"
+              zone_count: "{{ enabled_zones | count }}"
+              zones: "{{ enabled_labels }}"
+              peak_gpm: "{{ peak_gpm }}"
+              limit: "{{ limit | round(1) }}"
+          - action: input_text.set_value
+            target:
+              entity_id: "{{ status_entity }}"
+            data:
+              value: >-
+                Run Controller: {{ enabled_zones | count }} zone{{ 's' if enabled_zones | count > 1 }}
+                queued ({{ enabled_zones | map('regex_replace', '^', 'Z') | join('→') }})
+          # script.turn_on, not a direct call — this script returns immediately
+          # so the dashboard button is never left spinning for the whole run,
+          # and Stop All can still kill the sequencer independently.
+          - action: script.turn_on
+            target:
+              entity_id: script.irrigation_sequential_run
+            data:
+              variables:
+                system: "{{ system }}"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # irrigation_stop_all_systems — "STOP ALL IRRIGATION" button
+  # Global panic button. Stops what is running; leaves scheduling armed.
+  # ═══════════════════════════════════════════════════════════════════════════
+  irrigation_stop_all_systems:
+    alias: "Irrigation — Stop All Irrigation"
+    icon: mdi:stop-circle-outline
+    mode: single
+    description: >-
+      Halts every running and queued irrigation sequence on all four
+      controllers, cancels all 21 zone timers and closes all 21 valves. Master
+      schedule switches are left armed — this does not disarm the schedule.
+    variables:
+      all_systems: [east, garden, west1, west2]
+      # Snapshot before anything closes, so the log can say what was killed.
+      running_before: >-
+        {{ state_attr('sensor.outside_irrigation_total_gpm', 'zones')
+           | default([], true) | selectattr('on') | map(attribute='name') | list }}
+      gpm_before: "{{ states('sensor.outside_irrigation_total_gpm') | float(0) | round(1) }}"
+
+    sequence:
+      # Kill the sequencers FIRST — otherwise a runner mid-step would happily
+      # re-open the valve we are about to close.
+      - action: script.turn_off
+        target:
+          entity_id:
+            - script.irrigation_run_controller
+            - script.irrigation_sequential_run
+
+      # One stop implementation, run once per controller.
+      - repeat:
+          for_each: "{{ all_systems }}"
+          sequence:
+            - action: script.irrigation_stop_controller
+              data:
+                system: "{{ repeat.item }}"
+            - action: persistent_notification.dismiss
+              data:
+                notification_id: "irrigation_run_controller_{{ repeat.item }}"
+
+      - event: irrigation_stop_all_systems
+        event_data:
+          zone_count: "{{ running_before | count }}"
+          zones: "{{ running_before }}"
+          gpm_before: "{{ gpm_before }}"
