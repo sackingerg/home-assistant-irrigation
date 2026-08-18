@@ -12,8 +12,9 @@ your own.
 > with these sprinklers. It is a separate subsystem on its own hardware and is **not part
 > of this repository**.
 
-*Last verified against the live box: 2026-08-10 (entity registry, restored helper values,
-recorder history, and every package re-read from `/config`).*
+*Last verified against the live box: 2026-08-18 (entity registry, live states, recorder
+history, and every package and firmware file re-read from `/config`). Firmware 2.02 on all
+four controllers; `irrigation_zone_engine.yaml` and `irrigation_action_log.yaml` at 1.03.*
 
 ---
 
@@ -106,47 +107,104 @@ GPM figures are the live values of the `input_number.*_gpm` helpers, not constan
 
 ## 3. Firmware — what the ESP32 does
 
-The firmware is the **single source of shutoff truth**. Each zone switch carries an
-`on_turn_on` automation that does three things, in this order:
+The firmware is the **single source of shutoff truth**. HA arms a run and opens the valve;
+the ESP32 closes it. Nothing in the shutoff path waits on HA, so a zone still auto-offs with
+Home Assistant stopped, unreachable or powered down.
+
+All 21 zones across all four boards run **one shared definition**,
+`esphome/zone_timer.yaml`, included once per zone through each controller's `packages:`
+block and parameterised only by the zone's id and label:
+
+```yaml
+packages:
+  zone3_timer: !include {file: zone_timer.yaml, vars: {zid: zone3, zlabel: "Zone 3"}}
+```
+
+### Opening a valve
+
+`on_turn_on` applies two gates, then hands the countdown to a script:
 
 ```yaml
 on_turn_on:
   - if:
-      condition:                     # 1. INTERLOCK: max 2 zones per board
-        lambda: |-
-          int others = 0;
-          if (id(zone2).state) others++;
-          ... etc for every other zone on this board ...
-          return others >= 2;
+      condition:                      # 1. INTERLOCK: max 2 zones per board
+        lambda: 'return others >= 2;' # (enumerates the OTHER zones, excludes self)
       then:
-        - switch.turn_off: zone1     # rejected — pulses the switch on→off
+        - switch.turn_off: zone3      # rejected — pulses the switch on→off
       else:
         - if:
-            condition:               # 2. DURATION GATE: refuse an unarmed zone
-              lambda: 'return id(zone1_duration).state <= 0;'
+            condition:                # 2. DURATION GATE: refuse an unarmed zone
+              lambda: 'return id(zone3_duration).state <= 0;'
             then:
-              - switch.turn_off: zone1
-            else:                    # 3. AUTO-OFF: close after N minutes
-              - delay: !lambda 'return (uint32_t)(id(zone1_duration).state * 60000);'
-              - switch.turn_off: zone1
+              - switch.turn_off: zone3
+            else:
+              - script.execute: zone3_autooff
+on_turn_off:
+  - script.stop: zone3_autooff        # a stop must not leave a countdown armed
+  - lambda: 'id(zone3_end_ms) = 0;'
+  - component.update: zone3_remaining
 ```
 
-Consequences worth knowing:
+### The countdown is restartable
 
-- **A zone will not open unless HA has just written a duration > 0.** The duration numbers
-  are `restore_value: false`, so they are 0 after every reboot. A controller that reboots
-  mid-run comes back with all valves shut and refuses to reopen them on its own.
+```yaml
+script:
+  - id: zone3_autooff
+    mode: restart                     # ← cancels any pending countdown first
+    then:
+      - lambda: 'id(zone3_end_ms) = millis() + (uint32_t)(id(zone3_duration).state * 60000);'
+      - component.update: zone3_remaining
+      - delay: !lambda 'return (uint32_t)(id(zone3_duration).state * 60000);'
+      - switch.turn_off: zone3
+
+number:
+  - platform: template
+    id: zone3_duration
+    on_value:
+      - if:
+          condition:
+            and:
+              - switch.is_on: zone3   # ignore the arm-before-open write
+              - lambda: 'return x > 0;'   # a disarm is not a reset
+          then:
+            - script.execute: zone3_autooff
+```
+
+**Writing a new duration to a running zone restarts its countdown in place** — the valve is
+never closed and reopened. Both guards on `on_value` are load-bearing: without `switch.is_on`
+the pre-open arming write would start the countdown early, and without `x > 0` the stop
+path's disarm would be read as a reset.
+
+`mode: restart` also guarantees a zone can never hold two deadlines at once, which is what
+made the previous inline-`delay:` design unsafe to reset. See §10 stage 12.
+
+### Consequences worth knowing
+
+- **A zone will not open unless HA has just written a duration > 0.** Duration numbers are
+  `restore_value: false`, so they read 0 after every reboot. A controller that restarts on
+  its own comes back with all valves shut and cannot reopen one until HA re-arms it.
 - **Rejection looks like a brief on→off pulse**, not an error. HA detects it by checking
-  whether the switch is actually `on` 5 seconds after the start command (§5).
+  whether the switch is actually `on` a few seconds after the start command (§5).
 - **Relays are `restore_mode: ALWAYS_OFF`.** Power loss closes everything.
-- **The interlock is per-board.** West 1 cannot see West 2's zones. Property-wide flow is
-  an HA concern, not a firmware one.
+- **The interlock is per-board.** West 1 cannot see West 2's zones. Property-wide flow is an
+  HA concern, not a firmware one.
 
-Each board also exposes a status LED, WiFi signal, uptime, and ESPHome version.
+### What each board reports
+
+| Entity | Purpose |
+|---|---|
+| `sensor.…_zone_N_time_remaining` | seconds left on the **firmware's** countdown — the authoritative figure. 60 s poll, `delta: 1` filter so an idle zone is silent, plus an immediate publish on start, reset and stop. |
+| `sensor.…_config_revision` | the firmware version actually on the chip, e.g. `2.02` |
+| status LED, WiFi signal, uptime, ESPHome version | diagnostics |
+
+`config_revision` exists because a header comment describes the *file*, not the *chip*. On
+2026-08-17 three installs in a row silently flashed an old build and nothing reported it;
+the Overview header now reads all four and flags any mismatch.
 
 **HA never sends `switch.turn_off` during a normal run.** The only signals for a run are
-`number.set_value` (duration) then `switch.turn_on`. `turn_off` is sent only by the stop
-scripts.
+`number.set_value` (duration) then `switch.turn_on`. `turn_off` comes only from the stop
+scripts, or from HA's backstop if the firmware fails to auto-off — and that backstop is
+loud, because it means a real fault.
 
 ---
 
@@ -226,6 +284,26 @@ Dashboard zone card → `script.irrigation_run_zone` (system, zone) with that zo
 so concurrent Run Nows do not race. Ignores the master and the per-zone enable — it is a
 deliberate manual act.
 
+**Pressing Run Now on a zone that is already running RESETS its countdown** to the current
+slider value, without closing the valve. Press at 0:00 with 15 min set, press again at 13:00
+with 3 min set, and the zone closes 3 minutes later. It can shorten a run as well as extend
+one — the slider value is taken as the new runtime, not added to the old.
+
+That works because the duration write reaches the firmware, whose `on_value` restarts its
+`mode: restart` countdown in place (§3). Before 2026-08-17 the same press did nothing at
+all: the valve was already open, so `on_turn_on` never re-fired and the number was inert.
+
+**Two guards run before the controller is contacted:**
+
+| Guard | Behaviour |
+|---|---|
+| **Scheduled run in progress** | The press is **ignored entirely** — no duration write, no `turn_on`. The scheduled runtime is adhered to exactly, because consecutive scheduled zones depend on each block ending when it said it would. Detected statelessly: valve on **and** that zone's block active **and** its master armed **and** the zone enabled. Reported on the controller's status line and in the Action Log, never silent. |
+| **Over the pump limit** | Warns and **runs anyway** — notification, system log, ⚠️ Action Log entry. Monitor, not guard (§7c). |
+
+A manual run started in the minute or two *before* its own block opens is indistinguishable
+from a scheduled one and will be treated as scheduled. Deliberate: it errs toward protecting
+the schedule.
+
 ### Path C — Run Controller (whole controller, manual)
 
 Dashboard "Run Controller" button → `script.irrigation_run_controller` (field `system`).
@@ -236,7 +314,8 @@ Dashboard "Run Controller" button → `script.irrigation_run_controller` (field 
    order, **skipping any whose enable boolean is off**, each for its own Run Now duration,
    waiting for each ESP32 auto-off before starting the next.
 
-`mode: single` — a second press while a sequence is running is dropped.
+`irrigation_sequential_run` is `mode: parallel, max 4` — one slot per controller, so one
+controller's sequence never blocks another's button press.
 
 ### Restart safety
 
@@ -270,10 +349,12 @@ Layered, outermost first. Only two layers actually *prevent* anything.
 
 | Layer | Where | Enforces? | What it does |
 |---|---|---|---|
-| ESP32 auto-off | firmware | **yes** | closes the valve after N minutes regardless of HA |
+| ESP32 auto-off | firmware | **yes** | closes the valve after N minutes regardless of HA. `mode: restart`, so re-arming replaces the deadline rather than adding a second one |
 | ESP32 duration gate | firmware | **yes** | refuses to open a zone HA has not armed |
 | ESP32 max-2 interlock | firmware | **yes** | ≤2 zones per board; rejects the 3rd |
-| Run Controller pre-flight | `irrigation_zone_engine.yaml` | **yes** (manual runs only) | refuses a whole sequence that would exceed the pump cap |
+| Run Controller pre-flight | `irrigation_zone_engine.yaml` | **yes** (manual sequences only) | refuses a whole sequence that would exceed the pump cap |
+| Scheduled-run guard | `irrigation_zone_engine.yaml` | **yes** (protects, never waters) | a manual press cannot disturb a zone running from its block |
+| Single-run GPM warning | `irrigation_zone_engine.yaml` | no — warns | reports projected pump load on every manual start |
 | Grid over-limit verification | `scheduling_core.yaml` | no — warns | flags over-limit *programming* whenever the grid changes |
 | GPM monitor + banner | `irrigation_gpm_monitor.yaml` | no — warns | live total, red banner, persistent notification above cap |
 | Interlock retry | `scheduling_core.yaml` | n/a | a start *guarantee*, not a safety check |
@@ -286,10 +367,10 @@ service that has never existed on this box — and errored on every over-limit e
 
 ---
 
-## 7. The pump budget — three different mechanisms
+## 7. The pump budget — four different mechanisms
 
-One well pump, `input_number.outside_pump_max_gpm` = **20 GPM**. Three mechanisms watch it
-and they are easy to confuse:
+One well pump, `input_number.outside_pump_max_gpm` = **20 GPM**. Four mechanisms watch it
+and they are easy to confuse. **Only one ever refuses to water.**
 
 ### 7a. Live monitor — *observes*
 
@@ -352,6 +433,31 @@ zone being priced is the runner's own next step.
 
 ---
 
+### 7d. Single-run GPM warning — *reports, never refuses*
+
+Every **manual** single-zone start now prices itself against the pump and writes the result
+into that controller's status line:
+
+```
+Z3 · South Center C running (10.0 min) · 26.0 GPM ⚠ over 20.0
+```
+
+Over the limit adds a persistent notification (headed *"Over pump limit — still running"*),
+a `system_log` warning and a ⚠️ Action Log entry — and then **the zone runs**. Nothing is
+stopped. The firmware's max-2-per-board interlock remains the only runtime refusal.
+
+A zone that is already open is already counted in the property total, so a **reset does not
+double-count** its own draw.
+
+**Scheduled starts deliberately do not warn.** Over-limit *programming* is already caught by
+7b at edit time, so a notification per scheduled zone start would arrive nightly, unread,
+for a condition already reported — and it would reintroduce exactly the runtime noise the
+2026-07-27 policy removed. The status line still shows the figure; only the notification is
+suppressed.
+
+Before 2026-08-17 a manual single-zone run had **no** GPM check of any kind — you could
+start a 16 GPM zone while another controller ran 16 GPM and nothing said a word.
+
 ## 8. Dashboard
 
 One YAML-mode dashboard, `/config/dashboards/irrigation.yaml`, registered as
@@ -405,7 +511,8 @@ Conventions that matter here:
 |---|---|
 | `dashboards/irrigation.yaml` | the whole dashboard (6 views) |
 | `command_line_scripts/irrigation_schedule_days.py` | reads `.storage/schedule`, emits per-zone active/overlap/over-limit days |
-| `esphome/irrigation-east.yaml` | East firmware |
+| `esphome/zone_timer.yaml` | **The shared zone definition** — duration number, `mode: restart` countdown script, deadline global, Time Remaining sensor. Included once per zone by every board, 21 times total. One copy of the timing logic for the whole property. |
+| `esphome/irrigation-east.yaml` | East firmware — node identity, pin map, interlock, 6 `zone_timer` includes |
 | `esphome/irrigation_garden_controller.yaml` | Garden firmware |
 | `esphome/irrigation-west1-controller.yaml` | West 1 firmware |
 | `esphome/irrigation-west2-controller.yaml` | West 2 firmware |
@@ -442,6 +549,8 @@ Conventions that matter here:
 | `irrigation_controller_run_blocked` | 🔴 blocked by the gallon pre-flight |
 | `irrigation_controller_run_empty` | ⚪ pressed with every zone disabled |
 | `irrigation_stop_all_systems` | 🛑 global stop pressed |
+| `irrigation_manual_press_ignored` | 🔵 manual press on a zone running from its schedule — ignored on purpose |
+| `irrigation_single_run_over_gpm` | ⚠️ manual start pushed the pump over its limit — ran anyway |
 
 Plus every zone's on→off transition, logged with its **actual** measured runtime — so the
 log reflects what really happened, not what was configured. Sub-5-second transitions are
@@ -536,6 +645,28 @@ one registry of 21 zones and four generic scripts taking a controller key. The r
 **waits** for the valve to close instead of scheduling a close, so a run that ends early
 leaves nothing behind — and a controller can no longer drift from its siblings.
 
+**Stage 13 — the firmware countdown became restartable (2026-08-17, current).** The
+auto-off was an inline `delay:` inside `on_turn_on`, so the duration number was read **once**
+at valve-open and inert thereafter. Re-arming a running zone changed the displayed number and
+nothing else; the valve still closed on the original deadline. Worse, ESPHome de-duplicates
+`publish_state`, so re-issuing `switch.turn_on` on an open valve never re-fired the trigger
+either — the only way to re-read the arming was to close and reopen the valve.
+
+The countdown moved into a per-zone `mode: restart` script driven by the duration number's
+`on_value`. Writing a new duration to a running zone now restarts its countdown **in place**,
+and `mode: restart` guarantees a zone can never hold two deadlines — which is what made the
+inline delay unsafe to reset at all. All 21 zones moved to one shared `zone_timer.yaml`, and
+every board publishes a `Config Revision` sensor so the build on the chip is checkable from
+HA rather than inferred.
+
+Verified on West 1 Zone 1: opened 21:36:50 armed for 15 min, re-armed to 3 min at 21:38:50,
+closed 21:41:50 — exactly 3:00 later, with a single uninterrupted ON in the recorder.
+
+**Stage 14 — manual/scheduled separation and single-run flow reporting (2026-08-17).** Once
+a manual press could genuinely change a running zone, it also had to be prevented from
+changing a *scheduled* one, so the guard in §5 Path B was added. At the same time manual
+single-zone runs gained the GPM reporting they had never had (§7d).
+
 ---
 
 ## 11. Improvements this design bought
@@ -557,6 +688,20 @@ leaves nothing behind — and a controller can no longer drift from its siblings
 ---
 
 ## 12. Limits and known gaps
+
+### Considered and declined
+
+**Renaming zone entities to stable short IDs** (`switch.…_zone_2` instead of
+`switch.…_zone_2_south_center_b`), 2026-08-17. The argument for it is sound: an entity_id is
+an identity and a zone description is presentation, so baking "South Center B" into the ID
+means a later rename either makes the ID a lie or forces edits across 239 references. Generic
+names would also have made the four firmware files fully identical, letting the switch block
+join `zone_timer.yaml`.
+
+Declined on readability — the descriptive IDs make the YAML and the logs legible at a glance,
+and the change would orphan 21 entities (ESPHome derives `unique_id` from the name string, so
+renaming creates new entities rather than renaming existing ones). Revisit only if zones are
+actually renamed.
 
 **Design limits — deliberate**
 

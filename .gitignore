@@ -16,11 +16,22 @@ esphome/.esphome/
 *.log
 home-assistant.log*
 
-# Property imagery: supply your own, don't publish someone's aerial photo
+# Property imagery: supply your own, don't publish someone's aerial photo.
+# The blanket block stays — geotagged property photos must never be committed
+# by accident. Publishable media is whitelisted below, one file at a time, and
+# only after its metadata has been verified stripped.
 www/
 *.jpg
 *.jpeg
 *.png
+*.mov
+*.mp4
+
+# Verified metadata-free, cleared for publication 2026-08-18:
+!Pics/IMG_0802.JPG
+!Pics/IMG_0832.JPG
+!Pics/IMG_0956wtext.jpg
+!Pics/IMG_0805_small.gif
 
 # OS / editor noise
 .DS_Store

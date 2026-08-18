@@ -1,7 +1,27 @@
 # ─────────────────────────────────────────────────────────────────────────────
+# VERSION: 1.04  (2026-08-18)
+#
+#   1.04  Header wording only — dropped a reference to a package that no longer
+#         exists, which read as a dangling file name in the published copy.
+#   1.03  Single-run GPM: every manual zone start reports its projected pump
+#         load in the status line, and warns loudly when over the limit —
+#         notification, system log and action log. Never blocks; the firmware
+#         max-2 interlock remains the only runtime refusal.
+#   1.02  Scheduled-run guard: a manual press on a zone already running from
+#         its weekly block is ignored, and the controller is not contacted at
+#         all, so the scheduled runtime is adhered to exactly. Adds `schedule`
+#         to every zone_registry row and a sys_master map.
+#   1.01  run_controller and stop_all_systems moved in from a separate package,
+#         deleting its duplicate 21-row zone table. Every script declares all
+#         variables in one top-level block.
+#   1.00  Created — replaced 12 per-controller scripts with 6 generic ones
+#         driven by a single zone registry.
+#
+# VERSIONING RULE: any modification bumps VERSION by >= 0.01, bug fixes included.
+# ─────────────────────────────────────────────────────────────────────────────
 # IRRIGATION ZONE ENGINE — the one implementation, for all four controllers
 # File: packages/irrigation_zone_engine.yaml
-#   created 2026-08-10 · absorbed irrigation_manual_control.yaml 2026-08-11
+#   created 2026-08-10 · consolidated to six generic scripts 2026-08-11
 #
 # Deploy to: /config/packages/irrigation_zone_engine.yaml
 #
@@ -151,30 +171,30 @@ script:
     variables:
       zone_registry: &zone_registry
         # ── East ──
-        "east:1":   {switch: switch.outside_irrigation_east_zone_1_front_driveway,          duration: input_number.outside_irrigation_zone_1_duration, timer: timer.outside_irrigation_zone_1_timer, device: number.outside_irrigation_east_zone_1_duration, enable: input_boolean.outside_irrigation_zone_1_enabled, gpm: input_number.outside_irrigation_zone_1_gpm, label: "Z1 · Front Driveway"}
-        "east:2":   {switch: switch.outside_irrigation_east_zone_2_east_property_line,      duration: input_number.outside_irrigation_zone_2_duration, timer: timer.outside_irrigation_zone_2_timer, device: number.outside_irrigation_east_zone_2_duration, enable: input_boolean.outside_irrigation_zone_2_enabled, gpm: input_number.outside_irrigation_zone_2_gpm, label: "Z2 · East Property Line"}
-        "east:3":   {switch: switch.outside_irrigation_east_zone_3_driveway_east,           duration: input_number.outside_irrigation_zone_3_duration, timer: timer.outside_irrigation_zone_3_timer, device: number.outside_irrigation_east_zone_3_duration, enable: input_boolean.outside_irrigation_zone_3_enabled, gpm: input_number.outside_irrigation_zone_3_gpm, label: "Z3 · Driveway East"}
-        "east:4":   {switch: switch.outside_irrigation_east_zone_4_southeast_property_line, duration: input_number.outside_irrigation_zone_4_duration, timer: timer.outside_irrigation_zone_4_timer, device: number.outside_irrigation_east_zone_4_duration, enable: input_boolean.outside_irrigation_zone_4_enabled, gpm: input_number.outside_irrigation_zone_4_gpm, label: "Z4 · Southeast Property Line"}
-        "east:5":   {switch: switch.outside_irrigation_east_zone_5_east_side_flower_bed,    duration: input_number.outside_irrigation_zone_5_duration, timer: timer.outside_irrigation_zone_5_timer, device: number.outside_irrigation_east_zone_5_duration, enable: input_boolean.outside_irrigation_zone_5_enabled, gpm: input_number.outside_irrigation_zone_5_gpm, label: "Z5 · East Side Flower Bed"}
-        "east:6":   {switch: switch.outside_irrigation_east_zone_6_east_patio,              duration: input_number.outside_irrigation_zone_6_duration, timer: timer.outside_irrigation_zone_6_timer, device: number.outside_irrigation_east_zone_6_duration, enable: input_boolean.outside_irrigation_zone_6_enabled, gpm: input_number.outside_irrigation_zone_6_gpm, label: "Z6 · East Patio"}
+        "east:1":   {switch: switch.outside_irrigation_east_zone_1_front_driveway,          duration: input_number.outside_irrigation_zone_1_duration, timer: timer.outside_irrigation_zone_1_timer, device: number.outside_irrigation_east_zone_1_duration, enable: input_boolean.outside_irrigation_zone_1_enabled, gpm: input_number.outside_irrigation_zone_1_gpm, label: "Z1 · Front Driveway", schedule: schedule.outside_zone_1_schedule_front_driveway}
+        "east:2":   {switch: switch.outside_irrigation_east_zone_2_east_property_line,      duration: input_number.outside_irrigation_zone_2_duration, timer: timer.outside_irrigation_zone_2_timer, device: number.outside_irrigation_east_zone_2_duration, enable: input_boolean.outside_irrigation_zone_2_enabled, gpm: input_number.outside_irrigation_zone_2_gpm, label: "Z2 · East Property Line", schedule: schedule.outside_zone_2_schedule}
+        "east:3":   {switch: switch.outside_irrigation_east_zone_3_driveway_east,           duration: input_number.outside_irrigation_zone_3_duration, timer: timer.outside_irrigation_zone_3_timer, device: number.outside_irrigation_east_zone_3_duration, enable: input_boolean.outside_irrigation_zone_3_enabled, gpm: input_number.outside_irrigation_zone_3_gpm, label: "Z3 · Driveway East", schedule: schedule.outside_zone_3_schedule}
+        "east:4":   {switch: switch.outside_irrigation_east_zone_4_southeast_property_line, duration: input_number.outside_irrigation_zone_4_duration, timer: timer.outside_irrigation_zone_4_timer, device: number.outside_irrigation_east_zone_4_duration, enable: input_boolean.outside_irrigation_zone_4_enabled, gpm: input_number.outside_irrigation_zone_4_gpm, label: "Z4 · Southeast Property Line", schedule: schedule.outside_zone_4_schedule}
+        "east:5":   {switch: switch.outside_irrigation_east_zone_5_east_side_flower_bed,    duration: input_number.outside_irrigation_zone_5_duration, timer: timer.outside_irrigation_zone_5_timer, device: number.outside_irrigation_east_zone_5_duration, enable: input_boolean.outside_irrigation_zone_5_enabled, gpm: input_number.outside_irrigation_zone_5_gpm, label: "Z5 · East Side Flower Bed", schedule: schedule.outside_zone_5_schedule}
+        "east:6":   {switch: switch.outside_irrigation_east_zone_6_east_patio,              duration: input_number.outside_irrigation_zone_6_duration, timer: timer.outside_irrigation_zone_6_timer, device: number.outside_irrigation_east_zone_6_duration, enable: input_boolean.outside_irrigation_zone_6_enabled, gpm: input_number.outside_irrigation_zone_6_gpm, label: "Z6 · East Patio", schedule: schedule.outside_zone_6_schedule}
         # ── Garden ──
-        "garden:1": {switch: switch.outside_irrigation_garden_controller_zone_1_strawberries,             duration: input_number.outside_garden_zone_1_duration, timer: timer.outside_garden_zone_1_timer, device: number.outside_irrigation_garden_controller_zone_1_duration, enable: input_boolean.outside_garden_zone_1_enabled, gpm: input_number.outside_garden_zone_1_gpm, label: "Z1 · Strawberries"}
-        "garden:2": {switch: switch.outside_irrigation_garden_controller_zone_2_blueberry_blackberry_bed, duration: input_number.outside_garden_zone_2_duration, timer: timer.outside_garden_zone_2_timer, device: number.outside_irrigation_garden_controller_zone_2_duration, enable: input_boolean.outside_garden_zone_2_enabled, gpm: input_number.outside_garden_zone_2_gpm, label: "Z2 · Blueberry/Blackberry"}
-        "garden:3": {switch: switch.outside_irrigation_garden_controller_zone_3_dripper_system,           duration: input_number.outside_garden_zone_3_duration, timer: timer.outside_garden_zone_3_timer, device: number.outside_irrigation_garden_controller_zone_3_duration, enable: input_boolean.outside_garden_zone_3_enabled, gpm: input_number.outside_garden_zone_3_gpm, label: "Z3 · Dripper System"}
+        "garden:1": {switch: switch.outside_irrigation_garden_controller_zone_1_strawberries,             duration: input_number.outside_garden_zone_1_duration, timer: timer.outside_garden_zone_1_timer, device: number.outside_irrigation_garden_controller_zone_1_duration, enable: input_boolean.outside_garden_zone_1_enabled, gpm: input_number.outside_garden_zone_1_gpm, label: "Z1 · Strawberries", schedule: schedule.outside_garden_zone_1_schedule}
+        "garden:2": {switch: switch.outside_irrigation_garden_controller_zone_2_blueberry_blackberry_bed, duration: input_number.outside_garden_zone_2_duration, timer: timer.outside_garden_zone_2_timer, device: number.outside_irrigation_garden_controller_zone_2_duration, enable: input_boolean.outside_garden_zone_2_enabled, gpm: input_number.outside_garden_zone_2_gpm, label: "Z2 · Blueberry/Blackberry", schedule: schedule.outside_garden_zone_2_schedule}
+        "garden:3": {switch: switch.outside_irrigation_garden_controller_zone_3_dripper_system,           duration: input_number.outside_garden_zone_3_duration, timer: timer.outside_garden_zone_3_timer, device: number.outside_irrigation_garden_controller_zone_3_duration, enable: input_boolean.outside_garden_zone_3_enabled, gpm: input_number.outside_garden_zone_3_gpm, label: "Z3 · Dripper System", schedule: schedule.outside_garden_zone_3_schedule}
         # ── West 1 ──
-        "west1:1":  {switch: switch.outside_irrigation_west1_controller_zone_1_south_center_a, duration: input_number.outside_west1_zone_1_duration, timer: timer.outside_west1_zone_1_timer, device: number.outside_irrigation_west1_controller_zone_1_duration, enable: input_boolean.outside_west1_zone_1_enabled, gpm: input_number.outside_west1_zone_1_gpm, label: "Z1 · South Center A"}
-        "west1:2":  {switch: switch.outside_irrigation_west1_controller_zone_2_south_center_b, duration: input_number.outside_west1_zone_2_duration, timer: timer.outside_west1_zone_2_timer, device: number.outside_irrigation_west1_controller_zone_2_duration, enable: input_boolean.outside_west1_zone_2_enabled, gpm: input_number.outside_west1_zone_2_gpm, label: "Z2 · South Center B"}
-        "west1:3":  {switch: switch.outside_irrigation_west1_controller_zone_3_south_center_c, duration: input_number.outside_west1_zone_3_duration, timer: timer.outside_west1_zone_3_timer, device: number.outside_irrigation_west1_controller_zone_3_duration, enable: input_boolean.outside_west1_zone_3_enabled, gpm: input_number.outside_west1_zone_3_gpm, label: "Z3 · South Center C"}
-        "west1:4":  {switch: switch.outside_irrigation_west1_controller_zone_4_southwest,      duration: input_number.outside_west1_zone_4_duration, timer: timer.outside_west1_zone_4_timer, device: number.outside_irrigation_west1_controller_zone_4_duration, enable: input_boolean.outside_west1_zone_4_enabled, gpm: input_number.outside_west1_zone_4_gpm, label: "Z4 · Southwest"}
-        "west1:5":  {switch: switch.outside_irrigation_west1_controller_zone_5_west_center,    duration: input_number.outside_west1_zone_5_duration, timer: timer.outside_west1_zone_5_timer, device: number.outside_irrigation_west1_controller_zone_5_duration, enable: input_boolean.outside_west1_zone_5_enabled, gpm: input_number.outside_west1_zone_5_gpm, label: "Z5 · West Center"}
-        "west1:6":  {switch: switch.outside_irrigation_west1_controller_zone_6_far_west_edge,  duration: input_number.outside_west1_zone_6_duration, timer: timer.outside_west1_zone_6_timer, device: number.outside_irrigation_west1_controller_zone_6_duration, enable: input_boolean.outside_west1_zone_6_enabled, gpm: input_number.outside_west1_zone_6_gpm, label: "Z6 · Far West Edge"}
+        "west1:1":  {switch: switch.outside_irrigation_west1_controller_zone_1_south_center_a, duration: input_number.outside_west1_zone_1_duration, timer: timer.outside_west1_zone_1_timer, device: number.outside_irrigation_west1_controller_zone_1_duration, enable: input_boolean.outside_west1_zone_1_enabled, gpm: input_number.outside_west1_zone_1_gpm, label: "Z1 · South Center A", schedule: schedule.outside_west1_zone1_schedule}
+        "west1:2":  {switch: switch.outside_irrigation_west1_controller_zone_2_south_center_b, duration: input_number.outside_west1_zone_2_duration, timer: timer.outside_west1_zone_2_timer, device: number.outside_irrigation_west1_controller_zone_2_duration, enable: input_boolean.outside_west1_zone_2_enabled, gpm: input_number.outside_west1_zone_2_gpm, label: "Z2 · South Center B", schedule: schedule.outside_west1_zone2_schedule}
+        "west1:3":  {switch: switch.outside_irrigation_west1_controller_zone_3_south_center_c, duration: input_number.outside_west1_zone_3_duration, timer: timer.outside_west1_zone_3_timer, device: number.outside_irrigation_west1_controller_zone_3_duration, enable: input_boolean.outside_west1_zone_3_enabled, gpm: input_number.outside_west1_zone_3_gpm, label: "Z3 · South Center C", schedule: schedule.outside_west1_zone3_schedule}
+        "west1:4":  {switch: switch.outside_irrigation_west1_controller_zone_4_southwest,      duration: input_number.outside_west1_zone_4_duration, timer: timer.outside_west1_zone_4_timer, device: number.outside_irrigation_west1_controller_zone_4_duration, enable: input_boolean.outside_west1_zone_4_enabled, gpm: input_number.outside_west1_zone_4_gpm, label: "Z4 · Southwest", schedule: schedule.outside_west1_zone4_schedule}
+        "west1:5":  {switch: switch.outside_irrigation_west1_controller_zone_5_west_center,    duration: input_number.outside_west1_zone_5_duration, timer: timer.outside_west1_zone_5_timer, device: number.outside_irrigation_west1_controller_zone_5_duration, enable: input_boolean.outside_west1_zone_5_enabled, gpm: input_number.outside_west1_zone_5_gpm, label: "Z5 · West Center", schedule: schedule.outside_west1_zone5_schedule}
+        "west1:6":  {switch: switch.outside_irrigation_west1_controller_zone_6_far_west_edge,  duration: input_number.outside_west1_zone_6_duration, timer: timer.outside_west1_zone_6_timer, device: number.outside_irrigation_west1_controller_zone_6_duration, enable: input_boolean.outside_west1_zone_6_enabled, gpm: input_number.outside_west1_zone_6_gpm, label: "Z6 · Far West Edge", schedule: schedule.outside_west1_zone6_schedule}
         # ── West 2 ──
-        "west2:1":  {switch: switch.outside_irrigation_west2_controller_zone_1_near_shed,      duration: input_number.outside_west2_zone_1_duration, timer: timer.outside_west2_zone_1_timer, device: number.outside_irrigation_west2_controller_zone_1_duration, enable: input_boolean.outside_west2_zone_1_enabled, gpm: input_number.outside_west2_zone_1_gpm, label: "Z1 · Near Shed"}
-        "west2:2":  {switch: switch.outside_irrigation_west2_controller_zone_2_north_of_house, duration: input_number.outside_west2_zone_2_duration, timer: timer.outside_west2_zone_2_timer, device: number.outside_irrigation_west2_controller_zone_2_duration, enable: input_boolean.outside_west2_zone_2_enabled, gpm: input_number.outside_west2_zone_2_gpm, label: "Z2 · North of House"}
-        "west2:3":  {switch: switch.outside_irrigation_west2_controller_zone_3_north_top_edge, duration: input_number.outside_west2_zone_3_duration, timer: timer.outside_west2_zone_3_timer, device: number.outside_irrigation_west2_controller_zone_3_duration, enable: input_boolean.outside_west2_zone_3_enabled, gpm: input_number.outside_west2_zone_3_gpm, label: "Z3 · North Top Edge"}
-        "west2:4":  {switch: switch.outside_irrigation_west2_controller_zone_4_far_west,       duration: input_number.outside_west2_zone_4_duration, timer: timer.outside_west2_zone_4_timer, device: number.outside_irrigation_west2_controller_zone_4_duration, enable: input_boolean.outside_west2_zone_4_enabled, gpm: input_number.outside_west2_zone_4_gpm, label: "Z4 · Far West"}
-        "west2:5":  {switch: switch.outside_irrigation_west2_controller_zone_5_station_11,     duration: input_number.outside_west2_zone_5_duration, timer: timer.outside_west2_zone_5_timer, device: number.outside_irrigation_west2_controller_zone_5_duration, enable: input_boolean.outside_west2_zone_5_enabled, gpm: input_number.outside_west2_zone_5_gpm, label: "Z5 · Station 11"}
-        "west2:6":  {switch: switch.outside_irrigation_west2_controller_zone_6_center_west,    duration: input_number.outside_west2_zone_6_duration, timer: timer.outside_west2_zone_6_timer, device: number.outside_irrigation_west2_controller_zone_6_duration, enable: input_boolean.outside_west2_zone_6_enabled, gpm: input_number.outside_west2_zone_6_gpm, label: "Z6 · Center West"}
+        "west2:1":  {switch: switch.outside_irrigation_west2_controller_zone_1_near_shed,      duration: input_number.outside_west2_zone_1_duration, timer: timer.outside_west2_zone_1_timer, device: number.outside_irrigation_west2_controller_zone_1_duration, enable: input_boolean.outside_west2_zone_1_enabled, gpm: input_number.outside_west2_zone_1_gpm, label: "Z1 · Near Shed", schedule: schedule.outside_west2_zone1_schedule}
+        "west2:2":  {switch: switch.outside_irrigation_west2_controller_zone_2_north_of_house, duration: input_number.outside_west2_zone_2_duration, timer: timer.outside_west2_zone_2_timer, device: number.outside_irrigation_west2_controller_zone_2_duration, enable: input_boolean.outside_west2_zone_2_enabled, gpm: input_number.outside_west2_zone_2_gpm, label: "Z2 · North of House", schedule: schedule.outside_west2_zone2_schedule}
+        "west2:3":  {switch: switch.outside_irrigation_west2_controller_zone_3_north_top_edge, duration: input_number.outside_west2_zone_3_duration, timer: timer.outside_west2_zone_3_timer, device: number.outside_irrigation_west2_controller_zone_3_duration, enable: input_boolean.outside_west2_zone_3_enabled, gpm: input_number.outside_west2_zone_3_gpm, label: "Z3 · North Top Edge", schedule: schedule.outside_west2_zone3_schedule}
+        "west2:4":  {switch: switch.outside_irrigation_west2_controller_zone_4_far_west,       duration: input_number.outside_west2_zone_4_duration, timer: timer.outside_west2_zone_4_timer, device: number.outside_irrigation_west2_controller_zone_4_duration, enable: input_boolean.outside_west2_zone_4_enabled, gpm: input_number.outside_west2_zone_4_gpm, label: "Z4 · Far West", schedule: schedule.outside_west2_zone4_schedule}
+        "west2:5":  {switch: switch.outside_irrigation_west2_controller_zone_5_station_11,     duration: input_number.outside_west2_zone_5_duration, timer: timer.outside_west2_zone_5_timer, device: number.outside_irrigation_west2_controller_zone_5_duration, enable: input_boolean.outside_west2_zone_5_enabled, gpm: input_number.outside_west2_zone_5_gpm, label: "Z5 · Station 11", schedule: schedule.outside_west2_zone5_schedule}
+        "west2:6":  {switch: switch.outside_irrigation_west2_controller_zone_6_center_west,    duration: input_number.outside_west2_zone_6_duration, timer: timer.outside_west2_zone_6_timer, device: number.outside_irrigation_west2_controller_zone_6_duration, enable: input_boolean.outside_west2_zone_6_enabled, gpm: input_number.outside_west2_zone_6_gpm, label: "Z6 · Center West", schedule: schedule.outside_west2_zone6_schedule}
 
       sys_status: &sys_status
         east: input_text.outside_irrigation_status
@@ -194,14 +214,61 @@ script:
         west1: [1, 2, 3, 4, 5, 6]
         west2: [1, 2, 3, 4, 5, 6]
 
+      # Which master arms each controller's SCHEDULE. Not the same thing as the
+      # firmware arming (the duration number) — see the note on is_scheduled_run.
+      sys_master: &sys_master
+        east: input_boolean.outside_irrigation_schedule_enabled
+        garden: input_boolean.outside_garden_schedule_enabled
+        west1: input_boolean.outside_west1_schedule_enabled
+        west2: input_boolean.outside_west2_schedule_enabled
+
       sys_gpm_sensor: &sys_gpm_sensor
         east: sensor.outside_irrigation_east_gpm
         garden: sensor.outside_irrigation_garden_gpm
         west1: sensor.outside_irrigation_west1_gpm
         west2: sensor.outside_irrigation_west2_gpm
 
+      sys_master_map: *sys_master
       z: "{{ zone_registry.get(system ~ ':' ~ zone) }}"
       status_entity: "{{ sys_status.get(system) }}"
+      # A call carrying run_minutes came from the schedule reactor (or its
+      # retry). A call without one came from a button.
+      is_manual: "{{ (run_minutes | default(0) | float(0)) <= 0 }}"
+      # Is this zone ALREADY running as part of a scheduled block? The firmware
+      # cannot tell a schedule write from a button write — any duration write to
+      # a running zone restarts its countdown — so HA has to decide before
+      # contacting the controller at all.
+      #
+      # Stateless test, all four must hold: the valve is open, that zone's
+      # weekly block is active right now, its controller's schedule master is
+      # armed, and the zone itself is enabled. A schedule.* entity is 'on' only
+      # INSIDE a block, which is what makes this work.
+      #
+      # Known imprecision, deliberate: a manual run started moments before its
+      # own block opened looks identical to a scheduled one and will be treated
+      # as scheduled. That errs toward protecting the schedule, which is the
+      # safe direction.
+      # ── GPM for THIS run ──────────────────────────────────────────────
+      # Monitor, never a guard. A single zone is reported and — if it puts the
+      # pump over — flagged loudly, but it is never refused. Only the firmware's
+      # max-2-per-board interlock actually stops anything at runtime.
+      pump_max: "{{ states('input_number.outside_pump_max_gpm') | float(20) }}"
+      zone_gpm: "{{ (states(z.gpm) | float(0)) if z is not none else 0 }}"
+      # A zone that is already open is ALREADY in the property total, so a reset
+      # must not double-count it.
+      projected_gpm: >-
+        {{ (states('sensor.outside_irrigation_total_gpm') | float(0))
+           + (0 if (z is not none and is_state(z.switch, 'on')) else zone_gpm) }}
+      over_limit: "{{ projected_gpm | float(0) > pump_max | float(20) }}"
+      running_now: >-
+        {{ state_attr('sensor.outside_irrigation_total_gpm', 'zones')
+           | default([], true) | selectattr('on') | map(attribute='name') | list }}
+      is_scheduled_run: >-
+        {{ z is not none
+           and is_state(z.switch, 'on')
+           and is_state(z.schedule, 'on')
+           and is_state(sys_master_map.get(system, 'input_boolean.none'), 'on')
+           and is_state(z.enable, 'on') }}
       # Defensive: an unknown key must still render here so the guard below can
       # report it, rather than raising mid-sequence with a valve possibly open.
       dur_min: >-
@@ -225,11 +292,83 @@ script:
                 — nothing was run. Check the caller against zone_registry.
           - stop: "Unknown zone key"
 
+      # ── SCHEDULED RUNS ARE NOT DISTURBED BY A MANUAL PRESS ────────────────
+      # Bail out BEFORE any number.set_value or switch.turn_on: the controller
+      # must not be contacted at all, so its countdown keeps running untouched
+      # and the scheduled runtime is adhered to exactly. Consecutive scheduled
+      # zones depend on each block finishing when it said it would.
+      #
+      # Not silent — the controller's status line says why nothing happened,
+      # and it lands in the Irrigation Action Log.
+      - if:
+          - condition: template
+            value_template: "{{ is_manual and is_scheduled_run }}"
+        then:
+          - event: irrigation_manual_press_ignored
+            event_data:
+              system: "{{ system }}"
+              zone: "{{ zone }}"
+              label: "{{ z.label }}"
+              reason: scheduled_run_in_progress
+          - action: input_text.set_value
+            target:
+              entity_id: "{{ status_entity }}"
+            data:
+              value: >-
+                {{ z.label }} is on its schedule — manual press ignored
+          - stop: "Scheduled run in progress; controller not contacted"
+
       - action: input_text.set_value
         target:
           entity_id: "{{ status_entity }}"
         data:
-          value: "{{ z.label }} running ({{ dur_min | float(5) | round(1) }} min)"
+          value: >-
+            {{ z.label }} running ({{ dur_min | float(5) | round(1) }} min) ·
+            {{ projected_gpm | float(0) | round(1) }} GPM{% if over_limit %} ⚠ over {{ pump_max | float(20) | round(1) }}{% endif %}
+
+      # ── OVER-LIMIT WARNING — surfaces, does not refuse ────────────────────
+      # Manual runs only. Scheduled starts deliberately carry no runtime GPM
+      # noise (policy 2026-07-27): over-limit PROGRAMMING is caught by the grid
+      # verification automation at edit time, and a notification per scheduled
+      # zone start would arrive nightly, unread, for a condition already
+      # reported. The run proceeds either way — nothing below stops.
+      - if:
+          - condition: template
+            value_template: "{{ over_limit and is_manual }}"
+        then:
+          - event: irrigation_single_run_over_gpm
+            event_data:
+              system: "{{ system }}"
+              zone: "{{ zone }}"
+              label: "{{ z.label }}"
+              zone_gpm: "{{ zone_gpm | float(0) | round(1) }}"
+              projected: "{{ projected_gpm | float(0) | round(1) }}"
+              limit: "{{ pump_max | float(20) | round(1) }}"
+          - action: system_log.write
+            data:
+              level: warning
+              logger: irrigation.run_zone
+              message: >-
+                {{ sys_label.get(system) }} {{ z.label }} started manually at
+                {{ zone_gpm | float(0) | round(1) }} GPM — pump now at
+                {{ projected_gpm | float(0) | round(1) }} of
+                {{ pump_max | float(20) | round(1) }} GPM. Running anyway (monitor, not guard).
+          - action: persistent_notification.create
+            data:
+              notification_id: "irrigation_over_gpm_{{ system }}_{{ zone }}"
+              title: "⚠️ Over pump limit — still running"
+              message: |-
+                **{{ sys_label.get(system) }} — {{ z.label }}** was started manually and the
+                pump is now over its limit. **The zone is running; nothing was stopped.**
+
+                - This zone: **{{ zone_gpm | float(0) | round(1) }} GPM**
+                - Projected total: **{{ projected_gpm | float(0) | round(1) }} GPM**
+                - Pump maximum: **{{ pump_max | float(20) | round(1) }} GPM**
+                {% if running_now | count > 0 %}
+                Currently open: {{ running_now | join(' • ') }}
+                {% endif %}
+
+                Stop a zone if you did not intend this. Press **OK** to dismiss.
 
       - action: timer.start
         target:

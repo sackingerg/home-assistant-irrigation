@@ -1,4 +1,12 @@
 # ─────────────────────────────────────────────────────────────────────────────
+# VERSION: 1.03  (2026-08-17)
+#   1.03  logs irrigation_single_run_over_gpm (manual run over the pump limit)
+#   1.02  logs irrigation_manual_press_ignored (scheduled run protected)
+#   1.01  logs the Run Controller events: started / blocked / empty / stop-all
+#   1.00  created — rolling 40-entry history computed from real switch timings
+#
+# VERSIONING RULE: any modification bumps VERSION by >= 0.01, bug fixes included.
+# ─────────────────────────────────────────────────────────────────────────────
 # IRRIGATION ACTION LOG — rolling history of completed zone runs
 # Package: packages/irrigation_action_log.yaml   (created 2026-07-07)
 #
@@ -32,6 +40,10 @@ template:
         event_type: irrigation_controller_run_empty
       - trigger: event
         event_type: irrigation_stop_all_systems
+      - trigger: event
+        event_type: irrigation_manual_press_ignored
+      - trigger: event
+        event_type: irrigation_single_run_over_gpm
       - trigger: state
         entity_id:
           - switch.outside_irrigation_east_zone_1_front_driveway
@@ -119,6 +131,17 @@ template:
                 {# ⚪ button pressed with every zone disabled — nothing queued #}
                 {% set entry = now().strftime('%b %-d %I:%M %p') ~ '  —  ⚪ ' ~
                      d.label ~ '  —  Run Controller — no zones enabled, nothing run' %}
+              {% elif trigger.event.event_type == 'irrigation_single_run_over_gpm' %}
+                {# ⚠️ manual single-zone start pushed the pump over its limit —
+                   reported, NOT refused. The zone ran. #}
+                {% set entry = now().strftime('%b %-d %I:%M %p') ~ '  —  ⚠️ ' ~
+                     d.label ~ '  —  started at ' ~ d.zone_gpm ~ ' GPM, pump at ' ~
+                     d.projected ~ ' of ' ~ d.limit ~ ' GPM — ran anyway' %}
+              {% elif trigger.event.event_type == 'irrigation_manual_press_ignored' %}
+                {# 🔵 manual press on a zone already running from its schedule —
+                   ignored on purpose so the scheduled runtime is adhered to #}
+                {% set entry = now().strftime('%b %-d %I:%M %p') ~ '  —  🔵 ' ~
+                     d.label ~ '  —  manual press ignored, scheduled run in progress' %}
               {% elif trigger.event.event_type == 'irrigation_stop_all_systems' %}
                 {# 🛑 global Stop All Irrigation button #}
                 {% set entry = now().strftime('%b %-d %I:%M %p') ~ '  —  🛑 ' ~

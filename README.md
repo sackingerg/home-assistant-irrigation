@@ -42,12 +42,13 @@ from that split.
   is calendar-driven. 
 - **No flow or pressure sensing.** GPM figures are hand-entered estimates. The system
   does not track what actually flowed. A stuck valve or dead pump are not part of this automation.
-- **It does not stop a scheduled run that exceeds the pump budget.These are checked at scheduling time.
+- **It does not stop a scheduled run that exceeds the pump budget.** These are checked at scheduling time.
 
 ---
 
 ## Architecture
 
+```mermaid
 flowchart TB
     subgraph HA["Home Assistant"]
         SCH["21 schedule helpers<br/>(weekly block grids)"]
@@ -127,30 +128,47 @@ run_min: >-
 One intent, one edit. It also means a mid-block Home Assistant restart resumes the zone for
 the *remaining* time rather than restarting the full duration.
 
-### 2. Firmware is the single source of shutoff truth
+### 2. Firmware is the single source of shutoff truth — and its timer is restartable
 
-Every zone switch carries this, on the device:
+Every zone switch gates on two conditions, then hands the countdown to a script:
 
 ```yaml
 on_turn_on:
   - if:
-      condition:                     # max 2 zones on this board
+      condition:                      # max 2 zones on this board
         lambda: 'return others >= 2;'
       then:
-        - switch.turn_off: zone1     # rejected  pulses on-off
+        - switch.turn_off: zone1      # rejected, pulses on-off
       else:
         - if:
-            condition:               # refuse a zone HA hasn't armed
+            condition:                # refuse a zone HA hasn't armed
               lambda: 'return id(zone1_duration).state <= 0;'
             then:
               - switch.turn_off: zone1
             else:
-              - delay: !lambda 'return (uint32_t)(id(zone1_duration).state * 60000);'
-              - switch.turn_off: zone1
+              - script.execute: zone1_autooff
 ```
 
+The countdown itself lives in a `mode: restart` script, re-triggered whenever the duration
+number changes while the valve is open:
+
+```yaml
+script:
+  - id: zone1_autooff
+    mode: restart                     # cancels any pending countdown first
+    then:
+      - delay: !lambda 'return (uint32_t)(id(zone1_duration).state * 60000);'
+      - switch.turn_off: zone1
+```
+
+That one word, `restart`, is the difference between a timer you can reset and one you
+cannot. An inline `delay:` reads the duration **once**, at valve-open, and is deaf to it
+afterwards — so re-arming a running zone changed the displayed number and nothing else. It
+also left the old deadline armed, free to close a later run early.
+
 Duration numbers are `restore_value: false`, so a rebooted controller comes back with every
-valve shut and refuses to reopen until HA re-arms it.
+valve shut and refuses to reopen until HA re-arms it. All 21 zones share one definition,
+`esphome/zone_timer.yaml`, included once per zone — so this logic exists exactly once.
 
 ### 3. Wait for the valve to close  never schedule the close
 

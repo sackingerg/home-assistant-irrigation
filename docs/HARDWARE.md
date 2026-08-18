@@ -101,5 +101,5 @@ Zone GPM on this property, for reference:
 | West 1 | 16 | 16 | 10 | 16 | 10 | 16 |
 | West 2 | 16 | 16 | 16 | 16 | 16 | 12 |
 
-Rotor zones are typically 4 half-circle heads at 3–4 GPM per head. Drip and shrub-head
+Rotor zones are typically 4 half or full circle heads at 3–4 GPM per head. Drip and shrub-head
 zones are much lower.

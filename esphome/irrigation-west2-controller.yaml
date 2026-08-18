@@ -1,3 +1,25 @@
+# ═════════════════════════════════════════════════════════════════════════════
+# VERSION: 2.02  (2026-08-17)
+#
+#   2.02  Time Remaining: 60 s interval instead of 10 s (run lengths are whole
+#         minutes, so 10 s over-sampled), plus component.update on start,
+#         reset and stop so those transitions are immediate rather than polled.
+#   2.01  delta: 1 filter on Time Remaining — an idle zone no longer republishes
+#         the same 0 every interval. Six identical log lines per board per 10 s.
+#   2.00  Countdown moved out of an inline `delay:` in on_turn_on and into a
+#         per-zone `mode: restart` script driven by the duration number's
+#         on_value. Re-arming a RUNNING zone now restarts its countdown in
+#         place instead of doing nothing. Adds a Time Remaining sensor per zone
+#         and a Config Revision text sensor. Shared file: esphome/zone_timer.yaml.
+#   1.00  Original — auto-off was an inline `delay:` read once at valve-open.
+#         The duration number was inert for the rest of the run.
+#
+# VERSIONING RULE: any modification to this file bumps VERSION by >= 0.01, bug
+# fixes included. The Config Revision text sensor below must be bumped to match
+# in the same edit — a header comment describes the FILE, the sensor describes
+# what is actually running on the CHIP. Three installs on 2026-08-17 silently
+# flashed the old build because nothing reported the latter.
+# ═════════════════════════════════════════════════════════════════════════════
 # Board: Generic ESP32-S3 Board (Generic)
 # Definition: definitions/boards/generic-esp32s3/manifest.yaml
 
@@ -28,123 +50,30 @@ wifi:
     password: "REPLACE_WITH_YOUR_OWN_AP_PASSWORD"
 
 captive_portal:
-
-# --- Per-zone duration numbers ---
-# HA sets a zone's duration (in minutes) immediately before turning the
-# switch on. The switch's on_turn_on automation reads this value and runs for
-# exactly that many minutes before auto-offing. Default 0 means the firmware
-# carries no hardcoded run times — a zone will not open unless HA provides
-# a duration greater than zero.
+# --- Per-zone timers -------------------------------------------------------
+# Each zone's duration number, countdown script, remaining-time sensor and
+# deadline global all come from ONE shared definition: esphome/zone_timer.yaml.
+# Included once per zone below, so all 21 zones across all four controllers
+# share a single implementation instead of 21 hand-maintained copies.
 #
-# restore_value: false — duration resets to 0 on every reboot. A zone HA
-# has not re-armed after a restart will refuse to open.
-#
-# Expected HA entity IDs (verify in Settings → Devices after flashing):
+# `zlabel` reproduces the pre-existing entity names EXACTLY — changing it
+# would move the HA entity_ids and silently break every map and dashboard
+# reference. Expected HA entity IDs after flashing:
 #   number.outside_irrigation_west2_controller_zone_1_duration
 #   number.outside_irrigation_west2_controller_zone_2_duration
 #   number.outside_irrigation_west2_controller_zone_3_duration
 #   number.outside_irrigation_west2_controller_zone_4_duration
 #   number.outside_irrigation_west2_controller_zone_5_duration
 #   number.outside_irrigation_west2_controller_zone_6_duration
+#   ...and one sensor.outside_<node>_<zone>_time_remaining per zone (NEW).
 
-number:
-  - platform: template
-    name: "Zone 1 Duration"
-    id: zone1_duration
-    min_value: 0
-    max_value: 240
-    step: 1
-    unit_of_measurement: min
-    initial_value: 0
-    optimistic: true
-    restore_value: false
-
-  - platform: template
-    name: "Zone 2 Duration"
-    id: zone2_duration
-    min_value: 0
-    max_value: 240
-    step: 1
-    unit_of_measurement: min
-    initial_value: 0
-    optimistic: true
-    restore_value: false
-
-  - platform: template
-    name: "Zone 3 Duration"
-    id: zone3_duration
-    min_value: 0
-    max_value: 240
-    step: 1
-    unit_of_measurement: min
-    initial_value: 0
-    optimistic: true
-    restore_value: false
-
-  - platform: template
-    name: "Zone 4 Duration"
-    id: zone4_duration
-    min_value: 0
-    max_value: 240
-    step: 1
-    unit_of_measurement: min
-    initial_value: 0
-    optimistic: true
-    restore_value: false
-
-  - platform: template
-    name: "Zone 5 Duration"
-    id: zone5_duration
-    min_value: 0
-    max_value: 240
-    step: 1
-    unit_of_measurement: min
-    initial_value: 0
-    optimistic: true
-    restore_value: false
-
-  - platform: template
-    name: "Zone 6 Duration"
-    id: zone6_duration
-    min_value: 0
-    max_value: 240
-    step: 1
-    unit_of_measurement: min
-    initial_value: 0
-    optimistic: true
-    restore_value: false
-
-# --- Relay outputs ---
-# Irrigation West 2 covers old controller stations 7-12. Sequential mapping:
-#   Old station 7  → this board terminal 1 (GPIO1)
-#   Old station 8  → this board terminal 2 (GPIO2)
-#   Old station 9  → this board terminal 3 (GPIO41)
-#   Old station 10 → this board terminal 4 (GPIO42)
-#   Old station 11 → this board terminal 5 (GPIO45)
-#   Old station 12 → this board terminal 6 (GPIO46)
-#
-# Zone areas identified from property map (property_sprinkler_map.jpg):
-# Station 7 (→ terminal 1): near shed (pink/magenta line)
-# Station 8 (→ terminal 2): north of house (pink line)
-# Station 9 (→ terminal 3): north top edge, runs along 315' boundary (pink)
-# Station 10 (→ terminal 4): far west along 120' edge (yellow-green line)
-# Station 11 (→ terminal 5): not clearly labeled on map — confirm valve/area
-# Station 12 (→ terminal 6): center-west (mauve/pink line)
-#
-# GPM per station (surveyed): 16 / 16 / 16 / 16 / 16 / 12.
-# The live figures are input_number helpers in HA, not constants here.
-#
-# DURATION POLICY: HA sets each zone's duration number before turning the
-# switch on. If that number is 0 (the boot default), the zone is rejected
-# immediately and will not run. If > 0, the zone runs for exactly that many
-# minutes, then auto-offs. HA may also send an explicit switch.turn_off at
-# any time as a stop signal.
-#
-# INTERLOCK POLICY: max 2 of THIS board's zones open simultaneously.
-# This is a local backstop only — the real property-wide <=20 GPM total
-# across ALL controllers is a pending HA schedule_reactor task, not handled
-# in firmware. West 1 and West 2 are separate devices and cannot see each
-# other's zone states at the firmware level.
+packages:
+  zone1_timer: !include {file: zone_timer.yaml, vars: {zid: zone1, zlabel: "Zone 1"}}
+  zone2_timer: !include {file: zone_timer.yaml, vars: {zid: zone2, zlabel: "Zone 2"}}
+  zone3_timer: !include {file: zone_timer.yaml, vars: {zid: zone3, zlabel: "Zone 3"}}
+  zone4_timer: !include {file: zone_timer.yaml, vars: {zid: zone4, zlabel: "Zone 4"}}
+  zone5_timer: !include {file: zone_timer.yaml, vars: {zid: zone5, zlabel: "Zone 5"}}
+  zone6_timer: !include {file: zone_timer.yaml, vars: {zid: zone6, zlabel: "Zone 6"}}
 
 switch:
   - platform: gpio
@@ -173,8 +102,13 @@ switch:
                 then:
                   - switch.turn_off: zone1
                 else:
-                  - delay: !lambda 'return (uint32_t)(id(zone1_duration).state * 60000);'
-                  - switch.turn_off: zone1
+                  - script.execute: zone1_autooff
+    on_turn_off:
+      # A stop must cancel the pending countdown, not leave it armed to
+      # fire later and close a subsequent run early.
+      - script.stop: zone1_autooff
+      - lambda: 'id(zone1_end_ms) = 0;'
+      - component.update: zone1_remaining
 
   - platform: gpio
     id: zone2
@@ -202,8 +136,13 @@ switch:
                 then:
                   - switch.turn_off: zone2
                 else:
-                  - delay: !lambda 'return (uint32_t)(id(zone2_duration).state * 60000);'
-                  - switch.turn_off: zone2
+                  - script.execute: zone2_autooff
+    on_turn_off:
+      # A stop must cancel the pending countdown, not leave it armed to
+      # fire later and close a subsequent run early.
+      - script.stop: zone2_autooff
+      - lambda: 'id(zone2_end_ms) = 0;'
+      - component.update: zone2_remaining
 
   - platform: gpio
     id: zone3
@@ -231,8 +170,13 @@ switch:
                 then:
                   - switch.turn_off: zone3
                 else:
-                  - delay: !lambda 'return (uint32_t)(id(zone3_duration).state * 60000);'
-                  - switch.turn_off: zone3
+                  - script.execute: zone3_autooff
+    on_turn_off:
+      # A stop must cancel the pending countdown, not leave it armed to
+      # fire later and close a subsequent run early.
+      - script.stop: zone3_autooff
+      - lambda: 'id(zone3_end_ms) = 0;'
+      - component.update: zone3_remaining
 
   - platform: gpio
     id: zone4
@@ -260,8 +204,13 @@ switch:
                 then:
                   - switch.turn_off: zone4
                 else:
-                  - delay: !lambda 'return (uint32_t)(id(zone4_duration).state * 60000);'
-                  - switch.turn_off: zone4
+                  - script.execute: zone4_autooff
+    on_turn_off:
+      # A stop must cancel the pending countdown, not leave it armed to
+      # fire later and close a subsequent run early.
+      - script.stop: zone4_autooff
+      - lambda: 'id(zone4_end_ms) = 0;'
+      - component.update: zone4_remaining
 
   - platform: gpio
     id: zone5
@@ -290,8 +239,13 @@ switch:
                 then:
                   - switch.turn_off: zone5
                 else:
-                  - delay: !lambda 'return (uint32_t)(id(zone5_duration).state * 60000);'
-                  - switch.turn_off: zone5
+                  - script.execute: zone5_autooff
+    on_turn_off:
+      # A stop must cancel the pending countdown, not leave it armed to
+      # fire later and close a subsequent run early.
+      - script.stop: zone5_autooff
+      - lambda: 'id(zone5_end_ms) = 0;'
+      - component.update: zone5_remaining
 
   - platform: gpio
     id: zone6
@@ -320,8 +274,13 @@ switch:
                 then:
                   - switch.turn_off: zone6
                 else:
-                  - delay: !lambda 'return (uint32_t)(id(zone6_duration).state * 60000);'
-                  - switch.turn_off: zone6
+                  - script.execute: zone6_autooff
+    on_turn_off:
+      # A stop must cancel the pending countdown, not leave it armed to
+      # fire later and close a subsequent run early.
+      - script.stop: zone6_autooff
+      - lambda: 'id(zone6_end_ms) = 0;'
+      - component.update: zone6_remaining
 
 # --- Onboard status RGB LED ---
 # Waveshare ESP32-S3-Relay-6CH(B) onboard addressable (WS2812) RGB LED.
@@ -466,6 +425,17 @@ sensor:
   - platform: uptime
     name: "Irrigation West2 Uptime"
 
+# --- Build marker ------------------------------------------------------------
+# Publishes the revision above as an HA entity so "which build is actually
+# flashed?" is answerable without guessing. Rev 1 has no such entity, so its
+# absence is itself the answer.
 text_sensor:
+  - platform: template
+    name: "Config Revision"
+    id: config_revision
+    icon: mdi:tag-check
+    update_interval: 300s
+    lambda: 'return {"2.02"};'
+
   - platform: version
     name: "Irrigation West2 ESPHome Version"

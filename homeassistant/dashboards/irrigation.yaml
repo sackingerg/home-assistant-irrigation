@@ -1,4 +1,12 @@
 # ─────────────────────────────────────────────────────────────────────────────
+# VERSION: 1.01  (2026-08-17)
+#   1.01  Overview header shows live controller firmware version, and flags a
+#         mismatch between boards
+#   1.00  baseline at the time versioning was introduced
+#
+# VERSIONING RULE: any modification bumps VERSION by >= 0.01, bug fixes included.
+# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 # IRRIGATION DASHBOARD — ALL SYSTEMS
 # File: dashboards/irrigation.yaml
 #
@@ -282,6 +290,27 @@ views:
               **All zones idle** — no irrigation running.
               {% else %}
               **Active:** {% if east_active > 0 %}{{ east_active }} east{% endif %}{% if garden_active > 0 %}{% if east_active > 0 %}, {% endif %}{{ garden_active }} garden{% endif %}{% if west1_active > 0 %}{% if east_active + garden_active > 0 %}, {% endif %}{{ west1_active }} west 1{% endif %}{% if west2_active > 0 %}{% if east_active + garden_active + west1_active > 0 %}, {% endif %}{{ west2_active }} west 2{% endif %} zone{{ 's' if total > 1 }} running.
+              {% endif %}
+
+              {# ── Controller firmware version ───────────────────────────────
+                 Read LIVE from each board's Config Revision sensor rather than
+                 hard-coded, so this reports what is actually ON THE CHIPS. The
+                 boards are meant to run identical code, so anything other than
+                 one shared version is a fault worth seeing here. #}
+              {% set revs = [
+                states('sensor.outside_irrigation_east_config_revision'),
+                states('sensor.outside_irrigation_garden_controller_config_revision'),
+                states('sensor.outside_irrigation_west1_controller_config_revision'),
+                states('sensor.outside_irrigation_west2_controller_config_revision')
+              ] %}
+              {% set live = revs | reject('eq','unknown') | reject('eq','unavailable') | list %}
+              {% set uniq = live | unique | list %}
+              {% if uniq | count == 1 and live | count == 4 %}
+              🟢 **Firmware v{{ uniq[0] }}** — all 4 controllers
+              {% elif uniq | count == 0 %}
+              ⚫ Firmware version unknown — no controller reporting
+              {% else %}
+              ⚠️ **Firmware mismatch** — East {{ revs[0] }} · Garden {{ revs[1] }} · West 1 {{ revs[2] }} · West 2 {{ revs[3] }}
               {% endif %}
 
 
