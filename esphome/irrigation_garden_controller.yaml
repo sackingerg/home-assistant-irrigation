@@ -1,0 +1,317 @@
+# ═════════════════════════════════════════════════════════════════════════════
+# VERSION: 2.02  (2026-08-17)
+#
+#   2.02  Time Remaining: 60 s interval instead of 10 s (run lengths are whole
+#         minutes, so 10 s over-sampled), plus component.update on start,
+#         reset and stop so those transitions are immediate rather than polled.
+#   2.01  delta: 1 filter on Time Remaining — an idle zone no longer republishes
+#         the same 0 every interval. Six identical log lines per board per 10 s.
+#   2.00  Countdown moved out of an inline `delay:` in on_turn_on and into a
+#         per-zone `mode: restart` script driven by the duration number's
+#         on_value. Re-arming a RUNNING zone now restarts its countdown in
+#         place instead of doing nothing. Adds a Time Remaining sensor per zone
+#         and a Config Revision text sensor. Shared file: esphome/zone_timer.yaml.
+#   1.00  Original — auto-off was an inline `delay:` read once at valve-open.
+#         The duration number was inert for the rest of the run.
+#
+# VERSIONING RULE: any modification to this file bumps VERSION by >= 0.01, bug
+# fixes included. The Config Revision text sensor below must be bumped to match
+# in the same edit — a header comment describes the FILE, the sensor describes
+# what is actually running on the CHIP. Three installs on 2026-08-17 silently
+# flashed the old build because nothing reported the latter.
+# ═════════════════════════════════════════════════════════════════════════════
+# Board: ESP32-S3 DevKitC-1 (Espressif)
+# Definition: definitions/boards/esp32-s3-devkitc-1/manifest.yaml
+
+esphome:
+  name: irrigation_garden_controller
+  friendly_name: Irrigation_Garden_Controller
+
+esp32:
+  variant: esp32s3
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+
+logger:
+
+api:
+  encryption:
+    key: "REPLACE_WITH_YOUR_OWN_32_BYTE_BASE64_KEY"
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: !secret wifi_ssid
+    password: "REPLACE_WITH_YOUR_OWN_AP_PASSWORD"
+
+captive_portal:
+# --- Per-zone timers -------------------------------------------------------
+# Each zone's duration number, countdown script, remaining-time sensor and
+# deadline global all come from ONE shared definition: esphome/zone_timer.yaml.
+# Included once per zone below, so all 21 zones across all four controllers
+# share a single implementation instead of 21 hand-maintained copies.
+#
+# `zlabel` reproduces the pre-existing entity names EXACTLY — changing it
+# would move the HA entity_ids and silently break every map and dashboard
+# reference. Expected HA entity IDs after flashing:
+#   number.outside_irrigation_garden_controller_zone_1_duration
+#   number.outside_irrigation_garden_controller_zone_2_duration
+#   number.outside_irrigation_garden_controller_zone_3_duration
+#   ...and one sensor.outside_<node>_<zone>_time_remaining per zone (NEW).
+
+packages:
+  zone1_timer: !include {file: zone_timer.yaml, vars: {zid: zone1, zlabel: "Zone 1"}}
+  zone2_timer: !include {file: zone_timer.yaml, vars: {zid: zone2, zlabel: "Zone 2"}}
+  zone3_timer: !include {file: zone_timer.yaml, vars: {zid: zone3, zlabel: "Zone 3"}}
+
+switch:
+  - platform: gpio
+    id: zone1
+    name: "Zone 1 - Strawberries"
+    pin:
+      number: GPIO1
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - if:
+          condition:
+            lambda: |-
+              int others = 0;
+              if (id(zone2).state) others++;
+              if (id(zone3).state) others++;
+              return others >= 2;
+          then:
+            - switch.turn_off: zone1
+          else:
+            - if:
+                condition:
+                  lambda: 'return id(zone1_duration).state <= 0;'
+                then:
+                  - switch.turn_off: zone1
+                else:
+                  - script.execute: zone1_autooff
+    on_turn_off:
+      # A stop must cancel the pending countdown, not leave it armed to
+      # fire later and close a subsequent run early.
+      - script.stop: zone1_autooff
+      - lambda: 'id(zone1_end_ms) = 0;'
+      - component.update: zone1_remaining
+
+  - platform: gpio
+    id: zone2
+    name: "Zone 2 - Blueberry-Blackberry Bed"
+    pin:
+      number: GPIO2
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - if:
+          condition:
+            lambda: |-
+              int others = 0;
+              if (id(zone1).state) others++;
+              if (id(zone3).state) others++;
+              return others >= 2;
+          then:
+            - switch.turn_off: zone2
+          else:
+            - if:
+                condition:
+                  lambda: 'return id(zone2_duration).state <= 0;'
+                then:
+                  - switch.turn_off: zone2
+                else:
+                  - script.execute: zone2_autooff
+    on_turn_off:
+      # A stop must cancel the pending countdown, not leave it armed to
+      # fire later and close a subsequent run early.
+      - script.stop: zone2_autooff
+      - lambda: 'id(zone2_end_ms) = 0;'
+      - component.update: zone2_remaining
+
+  - platform: gpio
+    id: zone3
+    name: "Zone 3 - Dripper System"
+    pin:
+      number: GPIO41
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - if:
+          condition:
+            lambda: |-
+              int others = 0;
+              if (id(zone1).state) others++;
+              if (id(zone2).state) others++;
+              return others >= 2;
+          then:
+            - switch.turn_off: zone3
+          else:
+            - if:
+                condition:
+                  lambda: 'return id(zone3_duration).state <= 0;'
+                then:
+                  - switch.turn_off: zone3
+                else:
+                  - script.execute: zone3_autooff
+    on_turn_off:
+      # A stop must cancel the pending countdown, not leave it armed to
+      # fire later and close a subsequent run early.
+      - script.stop: zone3_autooff
+      - lambda: 'id(zone3_end_ms) = 0;'
+      - component.update: zone3_remaining
+
+# --- Onboard status RGB LED ---
+# Waveshare ESP32-S3-Relay-6CH(B) onboard addressable (WS2812) RGB LED.
+# Mirrors whichever zone is currently open: blinks N times (N = zone number)
+# followed by a pause, repeating for as long as that zone stays open.
+# Recalculated on every zone on/off — whether triggered by HA, the dashboard,
+# or the auto-off delays above — so it can never go stale.
+#
+# PIN/COLOR NOTES carried over from the east (same board family): GPIO38
+# confirmed correct by physical test on the east (2026-06-20) - LED lights
+# when driven from HA. rgb_order is RGB, not the WS2812-standard GRB - the
+# east's board showed red when commanded pure green under GRB, confirming
+# it's wired/labeled non-standard. Re-verify both by physical test on THIS
+# board before trusting them - not yet confirmed on this specific unit.
+light:
+  - platform: esp32_rmt_led_strip
+    id: status_led
+    pin: GPIO38
+    num_leds: 1
+    rgb_order: RGB
+    chipset: WS2812
+    name: "Status LED"
+    restore_mode: ALWAYS_OFF
+    default_transition_length: 0s
+
+globals:
+  - id: rgb_active_mask
+    type: int
+    restore_value: false
+    initial_value: '0'
+    # Bitmask, bit0=zone1, bit1=zone2, bit2=zone3 (3 zones on this
+    # controller, vs. the east's 6 - same pattern, fewer bits used).
+
+# DRIVE METHOD NOTE: the blink pattern is driven by a 1s interval poll below,
+# NOT by switch on_turn_on/on_turn_off triggers. On the east, an earlier
+# version wired refresh_status_led directly into each zone switch's
+# on_turn_on/on_turn_off, and that crashed the device on every boot -
+# restore_mode: ALWAYS_OFF forces each switch to its off state during the
+# switch's own setup(), which appears to fire the on_turn_off automation
+# synchronously, before the light component's RMT channel had finished
+# initializing. Calling light.turn_off on a not-yet-ready light component
+# triggered a boot failure, which ESPHome's safe_mode watchdog silently
+# rolled back every single time - hence nothing ever appeared to take
+# effect no matter what was changed. Polling via interval: only ever runs
+# after all components have finished setup(), so it sidesteps that ordering
+# hazard entirely.
+# The interval's lambda only touches the light/restarts the blink when the
+# active SET of zones actually CHANGES (compares the new bitmask against the
+# previous value of the global before overwriting it). Without that guard,
+# every 1s tick would force-restart blink_status_led mid-pattern, and the LED
+# would never complete a clean rotation - it would just stutter.
+#
+# This same zoneN.state polling pattern is reused above in each zone's
+# on_turn_on max-2 check - both read live switch states rather than
+# maintaining separate counters, for the same desync-avoidance reason.
+interval:
+  - interval: 1s
+    then:
+      - lambda: |-
+          int new_mask = 0;
+          if (id(zone1).state) new_mask |= 1;
+          if (id(zone2).state) new_mask |= 2;
+          if (id(zone3).state) new_mask |= 4;
+          if (new_mask != id(rgb_active_mask)) {
+            id(rgb_active_mask) = new_mask;
+            id(blink_status_led).stop();
+            id(status_led).turn_off().perform();
+            if (new_mask != 0) {
+              id(blink_status_led).execute();
+            }
+          }
+
+# blink_status_led: cycles through every currently-active zone in turn -
+# blinks zone N's number, short gap, moves to the next active zone, then a
+# longer pause once it's been through all of them, then repeats the whole
+# rotation for as long as rgb_active_mask stays nonzero. With only one zone
+# active this degrades to exactly the old single-zone behavior (blink N,
+# pause, repeat). Only (re)started by the interval above when the active set
+# changes, so a rotation always runs to completion undisturbed.
+script:
+  - id: blink_status_led
+    mode: restart
+    then:
+      - while:
+          condition:
+            lambda: 'return id(rgb_active_mask) != 0;'
+          then:
+            - if:
+                condition:
+                  lambda: 'return id(rgb_active_mask) & 1;'
+                then:
+                  - repeat:
+                      count: 1
+                      then:
+                        - light.turn_on: {id: status_led, brightness: 30%, red: 0.0, green: 1.0, blue: 0.0, transition_length: 0s}
+                        - delay: 250ms
+                        - light.turn_off: {id: status_led, transition_length: 0s}
+                        - delay: 250ms
+                  - delay: 400ms
+            - if:
+                condition:
+                  lambda: 'return id(rgb_active_mask) & 2;'
+                then:
+                  - repeat:
+                      count: 2
+                      then:
+                        - light.turn_on: {id: status_led, brightness: 30%, red: 0.0, green: 1.0, blue: 0.0, transition_length: 0s}
+                        - delay: 250ms
+                        - light.turn_off: {id: status_led, transition_length: 0s}
+                        - delay: 250ms
+                  - delay: 400ms
+            - if:
+                condition:
+                  lambda: 'return id(rgb_active_mask) & 4;'
+                then:
+                  - repeat:
+                      count: 3
+                      then:
+                        - light.turn_on: {id: status_led, brightness: 30%, red: 0.0, green: 1.0, blue: 0.0, transition_length: 0s}
+                        - delay: 250ms
+                        - light.turn_off: {id: status_led, transition_length: 0s}
+                        - delay: 250ms
+                  - delay: 400ms
+            - delay: 700ms
+
+# NOTE: board has a jumper (item 20 in Waveshare's diagram, "Relays default
+# control pin setting") that determines whether GPIO HIGH = relay ON or OFF.
+# Confirmed correct (no inverted: true needed) on the east's board - not
+# yet re-verified on this specific board, do that before trusting it.
+
+# --- Diagnostics, optional but cheap to have ---
+sensor:
+  - platform: wifi_signal
+    name: "Irrigation Garden Controller WiFi Signal"
+    update_interval: 60s
+
+  - platform: uptime
+    name: "Irrigation Garden Controller Uptime"
+
+# --- Build marker ------------------------------------------------------------
+# Publishes the revision above as an HA entity so "which build is actually
+# flashed?" is answerable without guessing. Rev 1 has no such entity, so its
+# absence is itself the answer.
+text_sensor:
+  - platform: template
+    name: "Config Revision"
+    id: config_revision
+    icon: mdi:tag-check
+    update_interval: 300s
+    lambda: 'return {"2.02"};'
+
+  - platform: version
+    name: "Irrigation Garden Controller ESPHome Version"

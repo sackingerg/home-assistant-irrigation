@@ -1,0 +1,399 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# IRRIGATION EAST — 6-ZONE EAST-SIDE CONTROLLER
+# Package: packages/irrigation_east.yaml
+#
+# PURPOSE
+# -------
+# Manual control, per-zone identity, and scheduled sequential runs for the
+# 6-zone ESPHome east-side irrigation controller (ESPHome node: irrigation-east,
+# area: Outside). Covers the front driveway, both property lines, driveway
+# approach, east flower bed, and east patio.
+#
+# This file owns all HA-side helpers and scripts for the east controller.
+# The ESPHome device itself (switches, number entities, diagnostics sensors)
+# is defined by the firmware, not here. Hardware entity IDs are listed below
+# for reference.
+#
+# SCHEDULING NOTE
+# ───────────────
+# Week-based, per-zone scheduling lives in packages/scheduling_core.yaml as a
+# generic schedule.* → switch reactor shared across all irrigation controllers.
+#
+# The per-zone schedule.* helpers MUST be UI-created storage helpers
+# (Settings → Devices & Services → Helpers → Schedule). YAML-defined schedule
+# entities open in the weekly grid editor but their "add block" control is
+# disabled — editing a YAML entity's configuration (which a schedule's time
+# blocks are) through the UI is not supported, the same reason a YAML
+# automation can't be drag-and-drop edited. UI storage helpers don't have that
+# restriction. Trade-off: their entity_id CAN drift if you use the UI's
+# "refresh entity ID" action — if that happens, update scheduling_core.yaml's
+# trigger list and both maps immediately; otherwise the reactor silently stops
+# controlling that zone.
+#
+# SCHEDULE HELPERS  (UI-created — entity_ids wired in scheduling_core.yaml)
+# ─────────────────────────────────────────────────────────────────────────────
+#   schedule.outside_zone_1_schedule_front_driveway   Zone 1 — Front Driveway
+#   schedule.outside_zone_2_schedule                  Zone 2 — East Property Line
+#   schedule.outside_zone_3_schedule                  Zone 3 — Driveway East
+#   schedule.outside_zone_4_schedule                  Zone 4 — SE Property Line
+#   schedule.outside_zone_5_schedule                  Zone 5 — East Flower Bed
+#   schedule.outside_zone_6_schedule                  Zone 6 — East Patio
+#
+# ZONE HARDWARE ENTITIES  (ESPHome switches — defined by device, not here)
+# ─────────────────────────────────────────────────────────────────────────────
+#   switch.outside_irrigation_east_zone_1_front_driveway
+#   switch.outside_irrigation_east_zone_2_east_property_line
+#   switch.outside_irrigation_east_zone_3_driveway_east
+#   switch.outside_irrigation_east_zone_4_southeast_property_line
+#   switch.outside_irrigation_east_zone_5_east_side_flower_bed
+#   switch.outside_irrigation_east_zone_6_east_patio
+#
+# Zones 1-5 share a pump. Physical GPM exclusivity is enforced by the ESPHome
+# firmware interlock — HA's sequential runner handles ordering but does not
+# enforce pump sharing itself.
+#
+# ZONE DURATION ENTITIES  (ESPHome number entities — set before switch.turn_on)
+# ─────────────────────────────────────────────────────────────────────────────
+#   number.outside_irrigation_east_zone_1_duration … zone_6_duration
+#
+# DEVICE DIAGNOSTICS  (read-only — used on dashboard, defined by device)
+# ─────────────────────────────────────────────────────────────────────────────
+#   sensor.outside_irrigation_east_irrigation_east_wifi_signal
+#   sensor.outside_irrigation_east_irrigation_east_uptime
+#   sensor.outside_irrigation_east_irrigation_east_esphome_version
+#
+# HELPERS DEFINED IN THIS FILE
+# ─────────────────────────────────────────────────────────────────────────────
+# input_boolean:
+#   outside_irrigation_schedule_enabled      master schedule arm/disarm toggle;
+#                                            checked by scheduling_core reactor
+#                                            before calling the sequential runner
+#   outside_irrigation_zone_1_enabled … 6   per-zone mute — when off, the
+#                                            sequential runner skips that zone
+#                                            even if its schedule block is ON;
+#                                            manual Run Now ignores this mute
+#
+# input_number:
+#   outside_irrigation_zone_1_duration … 6  manual run duration in minutes
+#                                            (initial: 30 min zones 1-5,
+#                                             15 min zone 6 — patio is smaller)
+#                                            Used ONLY by irrigation_run_zone.
+#                                            Scheduled runs derive duration from
+#                                            the schedule block's own end time.
+#
+# input_text:
+#   outside_irrigation_status               human-readable last-action string;
+#                                            written by every script path so the
+#                                            dashboard always shows current state
+#
+# timer:
+#   outside_irrigation_zone_1_timer … 6    per-zone visible countdown during
+#                                           manual runs; one per zone so
+#                                           concurrent manual runs don't race;
+#                                           display-only — valve timing is
+#                                           owned by the ESP32, not these timers
+#
+# SCRIPTS — NONE ARE DEFINED IN THIS FILE (since 2026-08-10)
+# ─────────────────────────────────────────────────────────────────────────────
+# This file owns East's HELPERS only. Every behaviour is shared, in
+# packages/irrigation_zone_engine.yaml, and takes system: east as an argument:
+#
+#   script.irrigation_run_zone         (system, zone[, run_minutes])
+#     One zone, one run. Backs the "Run Now" button, the zone-map dots, each
+#     step of a sequential run, AND every scheduled run (the reactor reaches it
+#     through script.outside_irrigation_retrying_zone_start).
+#   script.irrigation_stop_zone        (system, zone)   per-zone Stop button
+#   script.irrigation_stop_controller  (system)         page "Stop All"
+#   script.irrigation_sequential_run   (system)         "Run Controller" button,
+#     zones 1 → 6 in order, skipping disabled ones. MANUAL ONLY — the schedule
+#     reactor drives zones individually and never calls it.
+#
+# OPERATIONAL FLOW
+# ─────────────────────────────────────────────────────────────────────────────
+# Scheduled run (Path A — normal daily operation). CORRECTED 2026-08-07: this
+# used to say the reactor called irrigation_sequential_run. It does not,
+# and has not since the per-zone reactor rewrite of 2026-07-08. Scheduling is
+# PER ZONE — each zone's own schedule block starts that zone and nothing else.
+#
+#   schedule.outside_zone_N_schedule transitions ON
+#   → automation.schedule_reactor (scheduling_core.yaml) fires
+#   → resolves THAT ONE zone through the maps in scheduling_core
+#   → requires: master ON + that zone's enable ON + valve currently off
+#     + remaining block minutes > 0
+#   → calls script.outside_irrigation_retrying_zone_start with
+#     run_minutes = minutes remaining in the block (capped at 240)
+#   → which calls script.irrigation_run_zone (system: east), verifies the valve
+#     actually opened 5 s later, and retries once at 30 s (runtime −1 min)
+#     if the ESP32's max-2-zones interlock rejected it
+#   → the ESP32 auto-offs the valve at block end; HA sends no turn_off
+#
+#   THE SCHEDULE BLOCK IS THE RUNTIME. A block of 08:00-08:15 waters that zone
+#   for 15 minutes. To water longer, widen the block — the "Run Now Duration"
+#   input_number is NOT consulted for scheduled runs.
+#
+# Sequential run (Path A2 — manual, on demand):
+#   Dashboard "Run Controller" button → script.irrigation_run_controller
+#     (packages/irrigation_zone_engine.yaml, field system: east)
+#   → prices every ENABLED zone against the pump's max GPM; if any would go
+#     over, it names them in a persistent notification and runs NOTHING
+#   → otherwise calls script.irrigation_sequential_run (system: east)
+#   → runner walks zones 1 → 6, skipping any whose enable boolean is off,
+#     each for its own "Run Now Duration" minutes
+#   → sets ESP32 duration, starts countdown timer, opens valve
+#   → waits for ESP32 auto-off (wait_for_trigger on switch → off); timeout 2 h
+#   → cancels timer, moves to next zone
+#   → after Zone 6: writes "Scheduled run complete ✓" to status
+#
+# Manual single zone (Path B — spot watering / zone test):
+#   Dashboard "Run Now" button → script.irrigation_run_zone (system: east)
+#     (zone_number, zone_entity passed as fields)
+#   → sets ESP32 duration, updates status, starts timer, opens valve
+#   → HA delay matches duration (status tracking only; ESP32 owns valve-off)
+#   → cancels timer, writes "complete" to status
+#   Concurrency: mode:parallel, max 6 — each zone has its own timer so there
+#   is no shared state for concurrent runs to race on.
+#
+# Emergency stop (Path C):
+#   Dashboard "Stop All" button → script.irrigation_stop_controller (system: east)
+#   → kills irrigation_run_zone and irrigation_sequential_run
+#   → cancels all 6 timers
+#   → explicitly closes all 6 valves (switch.turn_off)
+#   → resets all 6 ESP32 duration numbers to 0
+#   → writes "Stopped manually" to status
+#
+# HA NEVER SENDS switch.turn_off DURING NORMAL OPERATION.
+# The only signals HA sends to the ESP32 for a zone run are:
+#   1. number.set_value  — duration in minutes (before valve opens)
+#   2. switch.turn_on    — open the valve
+# The ESP32 auto-offs the valve after the set duration. HA detects this via
+# wait_for_trigger in the sequential runner (or lets the delay expire in the
+# manual runner). switch.turn_off is only ever sent by irrigation_stop_controller.
+#
+# SAFETY NOTES
+# ─────────────────────────────────────────────────────────────────────────────
+# • irrigation_run_zone is mode:parallel (max 21) — multiple zones can be
+#   manually spot-watered at once. Tapping "Run Now" on the same zone twice
+#   while it's already running starts a second parallel run of the same zone
+#   (harmless but redundant). Tapping two different zones runs both, which is
+#   by design.
+# • irrigation_sequential_run is mode:parallel (max 4, one slot per
+#   controller) — a second press of "Run
+#   Controller" while a sequence is already running is silently dropped, and
+#   the run in progress continues uninterrupted. Scheduled runs are unaffected
+#   either way: they no longer go through this script at all.
+# • Duration numbers are reset to 0 on stop_all so no stale duration is sent
+#   to the ESP32 on the next turn-on.
+# • Countdown timers are restore: false — a reboot clears them. See the TIMERS
+#   section for why a restored countdown would misreport a valve that the
+#   firmware has already shut.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BOOLEAN HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+input_boolean:
+
+  # Master arm/disarm — gates the schedule_reactor for all east zones at once.
+  # Turning this off stops new scheduled runs from starting; any run already
+  # in progress continues until irrigation_stop_controller is called.
+  # Manual Run Now (irrigation_run_zone) is a separate code path and
+  # is unaffected by this toggle.
+  outside_irrigation_schedule_enabled:
+    name: "East Irrigation Schedule Enabled"
+    icon: mdi:calendar-clock
+
+  # Per-zone mute — when off, the sequential runner skips this zone's step
+  # even if its schedule block is currently ON. Does not affect manual Run Now.
+  outside_irrigation_zone_1_enabled:
+    name: "East Zone 1 Enabled"
+    icon: mdi:sprinkler-variant
+
+  outside_irrigation_zone_2_enabled:
+    name: "East Zone 2 Enabled"
+    icon: mdi:sprinkler-variant
+
+  outside_irrigation_zone_3_enabled:
+    name: "East Zone 3 Enabled"
+    icon: mdi:sprinkler-variant
+
+  outside_irrigation_zone_4_enabled:
+    name: "East Zone 4 Enabled"
+    icon: mdi:sprinkler-variant
+
+  outside_irrigation_zone_5_enabled:
+    name: "East Zone 5 Enabled"
+    icon: mdi:flower
+
+  outside_irrigation_zone_6_enabled:
+    name: "East Zone 6 Enabled"
+    icon: mdi:patio-heater
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# NUMBER HELPERS — MANUAL RUN DURATIONS
+# ═══════════════════════════════════════════════════════════════════════════════
+# Used ONLY by irrigation_run_zone (manual Run Now). Scheduled runs
+# derive their duration from each zone's schedule block's own end time, not
+# from these sliders.
+#
+# Initial values are set on first helper creation only; subsequent values are
+# persisted across restarts in .storage. Adjust per-zone defaults via the
+# dashboard duration sliders after first HA reload.
+
+input_number:
+
+  outside_irrigation_zone_1_duration:
+    name: "East Zone 1 Duration"       # Front Driveway
+    min: 1
+    max: 60
+    step: 1
+    initial: 30
+    unit_of_measurement: "min"
+    icon: mdi:timer
+    mode: slider
+
+  outside_irrigation_zone_2_duration:
+    name: "East Zone 2 Duration"       # East Property Line
+    min: 1
+    max: 60
+    step: 1
+    initial: 30
+    unit_of_measurement: "min"
+    icon: mdi:timer
+    mode: slider
+
+  outside_irrigation_zone_3_duration:
+    name: "East Zone 3 Duration"       # Driveway East
+    min: 1
+    max: 60
+    step: 1
+    initial: 30
+    unit_of_measurement: "min"
+    icon: mdi:timer
+    mode: slider
+
+  outside_irrigation_zone_4_duration:
+    name: "East Zone 4 Duration"       # Southeast Property Line
+    min: 1
+    max: 60
+    step: 1
+    initial: 30
+    unit_of_measurement: "min"
+    icon: mdi:timer
+    mode: slider
+
+  outside_irrigation_zone_5_duration:
+    name: "East Zone 5 Duration"       # East Side Flower Bed
+    min: 1
+    max: 60
+    step: 1
+    initial: 30
+    unit_of_measurement: "min"
+    icon: mdi:timer
+    mode: slider
+
+  outside_irrigation_zone_6_duration:
+    name: "East Zone 6 Duration"       # East Patio — smaller area, shorter default
+    min: 1
+    max: 60
+    step: 1
+    initial: 15
+    unit_of_measurement: "min"
+    icon: mdi:timer
+    mode: slider
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TEXT HELPER — STATUS MESSAGE
+# ═══════════════════════════════════════════════════════════════════════════════
+# Written by every script action path so the dashboard status card always
+# reflects the most recent operation without needing a template sensor.
+
+input_text:
+
+  outside_irrigation_status:
+    name: "East Irrigation Status"
+    initial: "Idle"
+    icon: mdi:information-outline
+    max: 255
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TIMERS — PER-ZONE MANUAL RUN COUNTDOWN
+# ═══════════════════════════════════════════════════════════════════════════════
+# One timer per zone — not a single shared timer — so that when multiple zones
+# are manually spot-watered at the same time, each shows its own accurate
+# countdown with no shared state for concurrent runs to race on.
+#
+# These are display-only entities. Actual valve timing (auto-off after N minutes)
+# is controlled by the ESP32 firmware.
+#
+# RESTART POLICY: restore: false (corrected 2026-08-07 — these were restore:
+# true, the only timers in the system that were). A restored countdown is a
+# LIE after a reboot: the ESP32 duration numbers are restore_value: false, so
+# the firmware has already forgotten the run and the valve is shut, but the
+# dashboard would keep counting down as though water were still flowing. The
+# schedule reactor's HA-start path re-arms any zone genuinely still inside its
+# block, and that path starts a fresh timer. Nothing should survive a reboot
+# except the schedule itself.
+
+timer:
+
+  outside_irrigation_zone_1_timer:
+    name: "East Zone 1 Timer"
+    icon: mdi:timer-sand
+    restore: false
+
+  outside_irrigation_zone_2_timer:
+    name: "East Zone 2 Timer"
+    icon: mdi:timer-sand
+    restore: false
+
+  outside_irrigation_zone_3_timer:
+    name: "East Zone 3 Timer"
+    icon: mdi:timer-sand
+    restore: false
+
+  outside_irrigation_zone_4_timer:
+    name: "East Zone 4 Timer"
+    icon: mdi:timer-sand
+    restore: false
+
+  outside_irrigation_zone_5_timer:
+    name: "East Zone 5 Timer"
+    icon: mdi:timer-sand
+    restore: false
+
+  outside_irrigation_zone_6_timer:
+    name: "East Zone 6 Timer"
+    icon: mdi:timer-sand
+    restore: false
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCRIPTS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# NOTE: this package no longer defines any scripts.
+# ───────────────────────────────────────────────────────────────────────────
+# The three scripts that used to live here — irrigation_run_zone, irrigation_stop_controller, irrigation_sequential_run —
+# were removed 2026-08-10 and replaced by ONE generic implementation in
+# packages/irrigation_zone_engine.yaml:
+#
+#     script.irrigation_run_zone         (system, zone[, run_minutes])
+#     script.irrigation_stop_zone        (system, zone)
+#     script.irrigation_stop_controller  (system)
+#     script.irrigation_sequential_run   (system)
+#
+# WHY: four hand-maintained copies of the same logic had drifted. West 1 and
+# West 2 ended a manual run with an unconditional switch.turn_off after a
+# plain delay; East and Garden did not. Because the script was mode: parallel,
+# each "Run Now" press left a delayed shutoff behind that cut short whatever
+# run was in progress when it fired — a 15-minute run measured 10m44s on
+# 2026-08-10. One implementation means no controller can drift again.
+#
+# This file now owns only this controller's HELPERS. Behaviour is shared.
+# ───────────────────────────────────────────────────────────────────────────

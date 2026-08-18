@@ -1,0 +1,498 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# IRRIGATION GPM MONITOR — property-wide flow visibility + over-limit warning
+# Package: packages/irrigation_gpm_monitor.yaml   (created 2026-07-06)
+#
+# PURPOSE
+# -------
+# Live visibility of estimated pump load at TWO levels:
+#   • per-system:  sensor.outside_irrigation_east_gpm / _garden_gpm / _west1_gpm / _west2_gpm
+#   • property:    sensor.outside_irrigation_total_gpm  (sum of the four system sensors)
+# plus a CLEAR WARNING (dashboard banner + persistent notification) when the
+# total exceeds the 20 GPM pump limit. All sensors recompute instantly when
+# any zone valve opens/closes or any GPM helper is edited.
+#
+# NO PHONE PUSH (my decision, 2026-07-13): pushes are banned from all irrigation
+# packages — irrigation runs at night with my phone in silent mode, so they
+# can never reach me. A push briefly lived here pointing at
+# notify.mobile_app_<my_phone>, a service that has never existed on this box,
+# which made this automation error out on every over-limit event (2026-07-14).
+#
+# THIS IS A MONITOR, NOT A GUARD. Nothing here ever turns a valve off or
+# blocks a zone from starting. I explicitly want to be able to run
+# past 20 GPM deliberately during tuning — the system's job is to make that
+# state unmissable, not to prevent it.
+#
+# GPM VALUES ARE input_number HELPERS, NOT CONSTANTS
+# ---------------------------------------------------
+# Each zone's GPM estimate is an input_number so it can be corrected from the
+# UI as real measurements come in — no YAML edit needed.
+# NOTE: no `initial:` on purpose — values persist across HA restarts, so the
+# YAML min/max/step here are bounds, not the live figures.
+#
+# ALL 21 ZONES NOW CARRY A NON-ZERO FIGURE (verified 2026-08-07). The earlier
+# note that West 1 / West 2 were unsurveyed and reading 0 is no longer true:
+#   East    16, 16, 16, 16, 15, 5
+#   Garden   3, 10, 10
+#   West 1  16, 16, 10, 16, 10, 16
+#   West 2  16, 16, 16, 16, 16, 12
+# A zone left at 0 would silently under-report the total AND pass the Run
+# Controller gallon pre-flight unchallenged — if a new zone is added, set its
+# GPM before scheduling it.
+#
+# Only the 21 sprinkler zones are counted. Any gravity-fed or separately
+# supplied irrigation on the property is EXCLUDED because it does not load
+# this pump. Anything that DOES draw from it needs its own entry here.
+#
+# STRUCTURE
+# ---------
+# Each per-system sensor owns its 6 (or 3) zone definitions in BOTH its state
+# and its `zones` attribute template (state-based template entities can't
+# share variables — keep the two lists in sync when editing). The total
+# sensor only references the four system sensors, so zones are defined in
+# exactly one file section per system.
+# ─────────────────────────────────────────────────────────────────────────────
+
+input_number:
+  # ── PUMP CAPACITY — single dynamic source of truth for the GPM limit ───────
+  # Referenced by the over-limit binary sensor, the warning automation, the
+  # schedule reactor's checked-start gate, and the dashboard banner. Editable
+  # from the Zone Config page. The limit rule remains "do not exceed": a total
+  # EQUAL to this value is acceptable.
+  outside_pump_max_gpm:
+    name: "Pump Max Output (GPM)"
+    min: 5
+    max: 40
+    step: 0.5
+    unit_of_measurement: "GPM"
+    icon: mdi:water-pump
+    mode: box
+
+  # ── East — GPM confirmed 2026-06-19 ────────────────────────────────────────
+  outside_irrigation_zone_1_gpm:
+    name: "East Z1 GPM (Front Driveway)"
+    min: 0
+    max: 30
+    step: 0.5
+    unit_of_measurement: "GPM"
+    icon: mdi:waves-arrow-right
+    mode: box
+  outside_irrigation_zone_2_gpm:
+    name: "East Z2 GPM (East Property Line)"
+    min: 0
+    max: 30
+    step: 0.5
+    unit_of_measurement: "GPM"
+    icon: mdi:waves-arrow-right
+    mode: box
+  outside_irrigation_zone_3_gpm:
+    name: "East Z3 GPM (Driveway East)"
+    min: 0
+    max: 30
+    step: 0.5
+    unit_of_measurement: "GPM"
+    icon: mdi:waves-arrow-right
+    mode: box
+  outside_irrigation_zone_4_gpm:
+    name: "East Z4 GPM (Southeast Property Line)"
+    min: 0
+    max: 30
+    step: 0.5
+    unit_of_measurement: "GPM"
+    icon: mdi:waves-arrow-right
+    mode: box
+  outside_irrigation_zone_5_gpm:
+    name: "East Z5 GPM (East Side Flower Bed)"
+    min: 0
+    max: 30
+    step: 0.5
+    unit_of_measurement: "GPM"
+    icon: mdi:waves-arrow-right
+    mode: box
+  outside_irrigation_zone_6_gpm:
+    name: "East Z6 GPM (East Patio)"
+    min: 0
+    max: 30
+    step: 0.5
+    unit_of_measurement: "GPM"
+    icon: mdi:waves-arrow-right
+    mode: box
+
+  # ── Garden & Raised Bed — estimates, not measured ──────────────────────────
+  outside_garden_zone_1_gpm:
+    name: "Garden Z1 GPM (Strawberries)"
+    min: 0
+    max: 30
+    step: 0.5
+    unit_of_measurement: "GPM"
+    icon: mdi:waves-arrow-right
+    mode: box
+  outside_garden_zone_2_gpm:
+    name: "Garden Z2 GPM (Blueberry/Blackberry Bed)"
+    min: 0
+    max: 30
+    step: 0.5
+    unit_of_measurement: "GPM"
+    icon: mdi:waves-arrow-right
+    mode: box
+  outside_garden_zone_3_gpm:
+    name: "Garden Z3 GPM (Dripper System)"
+    min: 0
+    max: 30
+    step: 0.5
+    unit_of_measurement: "GPM"
+    icon: mdi:waves-arrow-right
+    mode: box
+
+  # ── West 1 — surveyed; live values are in the header table ────────────────
+  outside_west1_zone_1_gpm:
+    name: "West1 Z1 GPM (South Center A)"
+    min: 0
+    max: 30
+    step: 0.5
+    unit_of_measurement: "GPM"
+    icon: mdi:waves-arrow-right
+    mode: box
+  outside_west1_zone_2_gpm:
+    name: "West1 Z2 GPM (South Center B)"
+    min: 0
+    max: 30
+    step: 0.5
+    unit_of_measurement: "GPM"
+    icon: mdi:waves-arrow-right
+    mode: box
+  outside_west1_zone_3_gpm:
+    name: "West1 Z3 GPM (South Center C)"
+    min: 0
+    max: 30
+    step: 0.5
+    unit_of_measurement: "GPM"
+    icon: mdi:waves-arrow-right
+    mode: box
+  outside_west1_zone_4_gpm:
+    name: "West1 Z4 GPM (Southwest)"
+    min: 0
+    max: 30
+    step: 0.5
+    unit_of_measurement: "GPM"
+    icon: mdi:waves-arrow-right
+    mode: box
+  outside_west1_zone_5_gpm:
+    name: "West1 Z5 GPM (West Center)"
+    min: 0
+    max: 30
+    step: 0.5
+    unit_of_measurement: "GPM"
+    icon: mdi:waves-arrow-right
+    mode: box
+  outside_west1_zone_6_gpm:
+    name: "West1 Z6 GPM (Far West Edge)"
+    min: 0
+    max: 30
+    step: 0.5
+    unit_of_measurement: "GPM"
+    icon: mdi:waves-arrow-right
+    mode: box
+
+  # ── West 2 — surveyed; live values are in the header table ────────────────
+  outside_west2_zone_1_gpm:
+    name: "West2 Z1 GPM (Near Shed)"
+    min: 0
+    max: 30
+    step: 0.5
+    unit_of_measurement: "GPM"
+    icon: mdi:waves-arrow-right
+    mode: box
+  outside_west2_zone_2_gpm:
+    name: "West2 Z2 GPM (North of House)"
+    min: 0
+    max: 30
+    step: 0.5
+    unit_of_measurement: "GPM"
+    icon: mdi:waves-arrow-right
+    mode: box
+  outside_west2_zone_3_gpm:
+    name: "West2 Z3 GPM (North Top Edge)"
+    min: 0
+    max: 30
+    step: 0.5
+    unit_of_measurement: "GPM"
+    icon: mdi:waves-arrow-right
+    mode: box
+  outside_west2_zone_4_gpm:
+    name: "West2 Z4 GPM (Far West)"
+    min: 0
+    max: 30
+    step: 0.5
+    unit_of_measurement: "GPM"
+    icon: mdi:waves-arrow-right
+    mode: box
+  outside_west2_zone_5_gpm:
+    name: "West2 Z5 GPM (Station 11)"
+    min: 0
+    max: 30
+    step: 0.5
+    unit_of_measurement: "GPM"
+    icon: mdi:waves-arrow-right
+    mode: box
+  outside_west2_zone_6_gpm:
+    name: "West2 Z6 GPM (Center West)"
+    min: 0
+    max: 30
+    step: 0.5
+    unit_of_measurement: "GPM"
+    icon: mdi:waves-arrow-right
+    mode: box
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GPM EDITOR SYSTEM PICKER — drives the Overview page's collapsible GPM editor.
+# The dashboard shows one conditional entities-card per option; picking a
+# system reveals its zones' GPM input_numbers as inline-editable boxes.
+# ─────────────────────────────────────────────────────────────────────────────
+input_select:
+  outside_gpm_edit_system:
+    name: "GPM Editor — Select System"
+    icon: mdi:pencil-ruler
+    options:
+      - Hidden
+      - East
+      - Garden
+      - West 1
+      - West 2
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PER-SYSTEM GPM SENSORS + PROPERTY TOTAL + OVER-LIMIT BINARY SENSOR
+# ─────────────────────────────────────────────────────────────────────────────
+template:
+  - sensor:
+      # ── EAST ────────────────────────────────────────────────────────────────
+      - name: "Irrigation East GPM"
+        unique_id: irrigation_east_gpm
+        unit_of_measurement: "GPM"
+        state_class: measurement
+        icon: mdi:water-pump
+        state: >-
+          {% set zones = [
+            ('switch.outside_irrigation_east_zone_1_front_driveway',          'input_number.outside_irrigation_zone_1_gpm'),
+            ('switch.outside_irrigation_east_zone_2_east_property_line',      'input_number.outside_irrigation_zone_2_gpm'),
+            ('switch.outside_irrigation_east_zone_3_driveway_east',           'input_number.outside_irrigation_zone_3_gpm'),
+            ('switch.outside_irrigation_east_zone_4_southeast_property_line', 'input_number.outside_irrigation_zone_4_gpm'),
+            ('switch.outside_irrigation_east_zone_5_east_side_flower_bed',    'input_number.outside_irrigation_zone_5_gpm'),
+            ('switch.outside_irrigation_east_zone_6_east_patio',              'input_number.outside_irrigation_zone_6_gpm'),
+          ] %}
+          {% set ns = namespace(total=0.0) %}
+          {% for sw, gpm in zones if is_state(sw, 'on') %}
+            {% set ns.total = ns.total + states(gpm) | float(0) %}
+          {% endfor %}
+          {{ ns.total | round(1) }}
+        attributes:
+          zones: >-
+            {% set zones = [
+              ('switch.outside_irrigation_east_zone_1_front_driveway',          'input_number.outside_irrigation_zone_1_gpm', 'East Z1 · Front Driveway'),
+              ('switch.outside_irrigation_east_zone_2_east_property_line',      'input_number.outside_irrigation_zone_2_gpm', 'East Z2 · East Property Line'),
+              ('switch.outside_irrigation_east_zone_3_driveway_east',           'input_number.outside_irrigation_zone_3_gpm', 'East Z3 · Driveway East'),
+              ('switch.outside_irrigation_east_zone_4_southeast_property_line', 'input_number.outside_irrigation_zone_4_gpm', 'East Z4 · Southeast Property Line'),
+              ('switch.outside_irrigation_east_zone_5_east_side_flower_bed',    'input_number.outside_irrigation_zone_5_gpm', 'East Z5 · East Side Flower Bed'),
+              ('switch.outside_irrigation_east_zone_6_east_patio',              'input_number.outside_irrigation_zone_6_gpm', 'East Z6 · East Patio'),
+            ] %}
+            {% set ns = namespace(items=[]) %}
+            {% for sw, gpm, label in zones %}
+              {% set ns.items = ns.items + [dict(name=label, gpm=states(gpm) | float(0), on=is_state(sw, 'on'))] %}
+            {% endfor %}
+            {{ ns.items }}
+
+      # ── GARDEN ─────────────────────────────────────────────────────────────
+      - name: "Irrigation Garden GPM"
+        unique_id: irrigation_garden_gpm
+        unit_of_measurement: "GPM"
+        state_class: measurement
+        icon: mdi:water-pump
+        state: >-
+          {% set zones = [
+            ('switch.outside_irrigation_garden_controller_zone_1_strawberries',             'input_number.outside_garden_zone_1_gpm'),
+            ('switch.outside_irrigation_garden_controller_zone_2_blueberry_blackberry_bed', 'input_number.outside_garden_zone_2_gpm'),
+            ('switch.outside_irrigation_garden_controller_zone_3_dripper_system',           'input_number.outside_garden_zone_3_gpm'),
+          ] %}
+          {% set ns = namespace(total=0.0) %}
+          {% for sw, gpm in zones if is_state(sw, 'on') %}
+            {% set ns.total = ns.total + states(gpm) | float(0) %}
+          {% endfor %}
+          {{ ns.total | round(1) }}
+        attributes:
+          zones: >-
+            {% set zones = [
+              ('switch.outside_irrigation_garden_controller_zone_1_strawberries',             'input_number.outside_garden_zone_1_gpm', 'Garden Z1 · Strawberries'),
+              ('switch.outside_irrigation_garden_controller_zone_2_blueberry_blackberry_bed', 'input_number.outside_garden_zone_2_gpm', 'Garden Z2 · Blueberry/Blackberry'),
+              ('switch.outside_irrigation_garden_controller_zone_3_dripper_system',           'input_number.outside_garden_zone_3_gpm', 'Garden Z3 · Dripper System'),
+            ] %}
+            {% set ns = namespace(items=[]) %}
+            {% for sw, gpm, label in zones %}
+              {% set ns.items = ns.items + [dict(name=label, gpm=states(gpm) | float(0), on=is_state(sw, 'on'))] %}
+            {% endfor %}
+            {{ ns.items }}
+
+      # ── WEST 1 ─────────────────────────────────────────────────────────────
+      - name: "Irrigation West1 GPM"
+        unique_id: irrigation_west1_gpm
+        unit_of_measurement: "GPM"
+        state_class: measurement
+        icon: mdi:water-pump
+        state: >-
+          {% set zones = [
+            ('switch.outside_irrigation_west1_controller_zone_1_south_center_a', 'input_number.outside_west1_zone_1_gpm'),
+            ('switch.outside_irrigation_west1_controller_zone_2_south_center_b', 'input_number.outside_west1_zone_2_gpm'),
+            ('switch.outside_irrigation_west1_controller_zone_3_south_center_c', 'input_number.outside_west1_zone_3_gpm'),
+            ('switch.outside_irrigation_west1_controller_zone_4_southwest',      'input_number.outside_west1_zone_4_gpm'),
+            ('switch.outside_irrigation_west1_controller_zone_5_west_center',    'input_number.outside_west1_zone_5_gpm'),
+            ('switch.outside_irrigation_west1_controller_zone_6_far_west_edge',  'input_number.outside_west1_zone_6_gpm'),
+          ] %}
+          {% set ns = namespace(total=0.0) %}
+          {% for sw, gpm in zones if is_state(sw, 'on') %}
+            {% set ns.total = ns.total + states(gpm) | float(0) %}
+          {% endfor %}
+          {{ ns.total | round(1) }}
+        attributes:
+          zones: >-
+            {% set zones = [
+              ('switch.outside_irrigation_west1_controller_zone_1_south_center_a', 'input_number.outside_west1_zone_1_gpm', 'West1 Z1 · South Center A'),
+              ('switch.outside_irrigation_west1_controller_zone_2_south_center_b', 'input_number.outside_west1_zone_2_gpm', 'West1 Z2 · South Center B'),
+              ('switch.outside_irrigation_west1_controller_zone_3_south_center_c', 'input_number.outside_west1_zone_3_gpm', 'West1 Z3 · South Center C'),
+              ('switch.outside_irrigation_west1_controller_zone_4_southwest',      'input_number.outside_west1_zone_4_gpm', 'West1 Z4 · Southwest'),
+              ('switch.outside_irrigation_west1_controller_zone_5_west_center',    'input_number.outside_west1_zone_5_gpm', 'West1 Z5 · West Center'),
+              ('switch.outside_irrigation_west1_controller_zone_6_far_west_edge',  'input_number.outside_west1_zone_6_gpm', 'West1 Z6 · Far West Edge'),
+            ] %}
+            {% set ns = namespace(items=[]) %}
+            {% for sw, gpm, label in zones %}
+              {% set ns.items = ns.items + [dict(name=label, gpm=states(gpm) | float(0), on=is_state(sw, 'on'))] %}
+            {% endfor %}
+            {{ ns.items }}
+
+      # ── WEST 2 ─────────────────────────────────────────────────────────────
+      - name: "Irrigation West2 GPM"
+        unique_id: irrigation_west2_gpm
+        unit_of_measurement: "GPM"
+        state_class: measurement
+        icon: mdi:water-pump
+        state: >-
+          {% set zones = [
+            ('switch.outside_irrigation_west2_controller_zone_1_near_shed',      'input_number.outside_west2_zone_1_gpm'),
+            ('switch.outside_irrigation_west2_controller_zone_2_north_of_house', 'input_number.outside_west2_zone_2_gpm'),
+            ('switch.outside_irrigation_west2_controller_zone_3_north_top_edge', 'input_number.outside_west2_zone_3_gpm'),
+            ('switch.outside_irrigation_west2_controller_zone_4_far_west',       'input_number.outside_west2_zone_4_gpm'),
+            ('switch.outside_irrigation_west2_controller_zone_5_station_11',     'input_number.outside_west2_zone_5_gpm'),
+            ('switch.outside_irrigation_west2_controller_zone_6_center_west',    'input_number.outside_west2_zone_6_gpm'),
+          ] %}
+          {% set ns = namespace(total=0.0) %}
+          {% for sw, gpm in zones if is_state(sw, 'on') %}
+            {% set ns.total = ns.total + states(gpm) | float(0) %}
+          {% endfor %}
+          {{ ns.total | round(1) }}
+        attributes:
+          zones: >-
+            {% set zones = [
+              ('switch.outside_irrigation_west2_controller_zone_1_near_shed',      'input_number.outside_west2_zone_1_gpm', 'West2 Z1 · Near Shed'),
+              ('switch.outside_irrigation_west2_controller_zone_2_north_of_house', 'input_number.outside_west2_zone_2_gpm', 'West2 Z2 · North of House'),
+              ('switch.outside_irrigation_west2_controller_zone_3_north_top_edge', 'input_number.outside_west2_zone_3_gpm', 'West2 Z3 · North Top Edge'),
+              ('switch.outside_irrigation_west2_controller_zone_4_far_west',       'input_number.outside_west2_zone_4_gpm', 'West2 Z4 · Far West'),
+              ('switch.outside_irrigation_west2_controller_zone_5_station_11',     'input_number.outside_west2_zone_5_gpm', 'West2 Z5 · Station 11'),
+              ('switch.outside_irrigation_west2_controller_zone_6_center_west',    'input_number.outside_west2_zone_6_gpm', 'West2 Z6 · Center West'),
+            ] %}
+            {% set ns = namespace(items=[]) %}
+            {% for sw, gpm, label in zones %}
+              {% set ns.items = ns.items + [dict(name=label, gpm=states(gpm) | float(0), on=is_state(sw, 'on'))] %}
+            {% endfor %}
+            {{ ns.items }}
+
+      # ── PROPERTY TOTAL — sums the four per-system sensors ──────────────────
+      # Recomputes automatically whenever any system sensor changes (which in
+      # turn recompute whenever any zone switch or GPM helper changes), so the
+      # total updates the moment anyone turns a zone on, from any UI or
+      # schedule, on any controller.
+      - name: "Irrigation Total GPM"
+        unique_id: irrigation_total_gpm
+        unit_of_measurement: "GPM"
+        state_class: measurement
+        icon: mdi:water-pump
+        state: >-
+          {{ (states('sensor.outside_irrigation_east_gpm')   | float(0)
+            + states('sensor.outside_irrigation_garden_gpm') | float(0)
+            + states('sensor.outside_irrigation_west1_gpm')  | float(0)
+            + states('sensor.outside_irrigation_west2_gpm')  | float(0)) | round(1) }}
+        attributes:
+          zones: >-
+            {{ (state_attr('sensor.outside_irrigation_east_gpm',   'zones') or [])
+             + (state_attr('sensor.outside_irrigation_garden_gpm', 'zones') or [])
+             + (state_attr('sensor.outside_irrigation_west1_gpm',  'zones') or [])
+             + (state_attr('sensor.outside_irrigation_west2_gpm',  'zones') or []) }}
+          running_count: >-
+            {{ ((state_attr('sensor.outside_irrigation_east_gpm',   'zones') or [])
+              + (state_attr('sensor.outside_irrigation_garden_gpm', 'zones') or [])
+              + (state_attr('sensor.outside_irrigation_west1_gpm',  'zones') or [])
+              + (state_attr('sensor.outside_irrigation_west2_gpm',  'zones') or []))
+               | selectattr('on') | list | count }}
+
+  - binary_sensor:
+      - name: "Irrigation Over Pump Limit"
+        unique_id: irrigation_over_pump_limit
+        device_class: problem
+        icon: mdi:water-alert
+        # ">" not ">=": the limit value itself is acceptable ("do not exceed",
+        # not "stay strictly under"). Limit is dynamic via the pump helper.
+        state: >-
+          {{ states('sensor.outside_irrigation_total_gpm') | float(0)
+             > states('input_number.outside_pump_max_gpm') | float(20) }}
+        # Brief transients while one zone hands off to another shouldn't fire
+        # the warning. Raised 15s → 60s on 2026-07-27: runtime GPM blocking
+        # was removed (grid is verified at programming time instead), so
+        # handoff overlaps are now expected and the pump tolerates them —
+        # only SUSTAINED over-limit should warn. Slow motorized valves can
+        # take >15s to close, which made 15s too twitchy.
+        delay_on:
+          seconds: 60
+
+# ─────────────────────────────────────────────────────────────────────────────
+# OVER-LIMIT WARNING — persistent notification (no phone push, see header).
+# Auto-dismisses the persistent notification when the total drops back
+# to/below 20.
+# ─────────────────────────────────────────────────────────────────────────────
+automation:
+  - id: irrigation_gpm_over_limit_warning
+    alias: "Irrigation — Over 20 GPM Warning"
+    description: >-
+      Warns (dashboard banner is separate, in the Lovelace conditional card)
+      via persistent notification when total irrigation flow exceeds the
+      20 GPM pump limit. Monitor only — never stops a zone.
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.outside_irrigation_over_pump_limit
+        to: "on"
+        id: over
+      - trigger: state
+        entity_id: binary_sensor.outside_irrigation_over_pump_limit
+        to: "off"
+        id: back_under
+    actions:
+      - choose:
+          - conditions:
+              - condition: trigger
+                id: over
+            sequence:
+              - action: persistent_notification.create
+                data:
+                  notification_id: irrigation_gpm_over_limit
+                  title: "🔴 Irrigation over pump limit"
+                  message: >-
+                    Total flow is {{ states('sensor.outside_irrigation_total_gpm') }} GPM
+                    (limit {{ states('input_number.outside_pump_max_gpm') | round(1) }}). East {{ states('sensor.outside_irrigation_east_gpm') }} ·
+                    Garden {{ states('sensor.outside_irrigation_garden_gpm') }} ·
+                    West1 {{ states('sensor.outside_irrigation_west1_gpm') }} ·
+                    West2 {{ states('sensor.outside_irrigation_west2_gpm') }}. Running:
+                    {{ state_attr('sensor.outside_irrigation_total_gpm', 'zones')
+                       | selectattr('on') | map(attribute='name') | join(', ') }}
+          - conditions:
+              - condition: trigger
+                id: back_under
+            sequence:
+              - action: persistent_notification.dismiss
+                data:
+                  notification_id: irrigation_gpm_over_limit
+    mode: restart

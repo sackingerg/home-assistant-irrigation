@@ -1,0 +1,441 @@
+# ═════════════════════════════════════════════════════════════════════════════
+# VERSION: 2.02  (2026-08-17)
+#
+#   2.02  Time Remaining: 60 s interval instead of 10 s (run lengths are whole
+#         minutes, so 10 s over-sampled), plus component.update on start,
+#         reset and stop so those transitions are immediate rather than polled.
+#   2.01  delta: 1 filter on Time Remaining — an idle zone no longer republishes
+#         the same 0 every interval. Six identical log lines per board per 10 s.
+#   2.00  Countdown moved out of an inline `delay:` in on_turn_on and into a
+#         per-zone `mode: restart` script driven by the duration number's
+#         on_value. Re-arming a RUNNING zone now restarts its countdown in
+#         place instead of doing nothing. Adds a Time Remaining sensor per zone
+#         and a Config Revision text sensor. Shared file: esphome/zone_timer.yaml.
+#   1.00  Original — auto-off was an inline `delay:` read once at valve-open.
+#         The duration number was inert for the rest of the run.
+#
+# VERSIONING RULE: any modification to this file bumps VERSION by >= 0.01, bug
+# fixes included. The Config Revision text sensor below must be bumped to match
+# in the same edit — a header comment describes the FILE, the sensor describes
+# what is actually running on the CHIP. Three installs on 2026-08-17 silently
+# flashed the old build because nothing reported the latter.
+# ═════════════════════════════════════════════════════════════════════════════
+# Board: Generic ESP32-S3 Board (Generic)
+# Definition: definitions/boards/generic-esp32s3/manifest.yaml
+
+esphome:
+  name: irrigation_west1_controller
+  friendly_name: Irrigation_West1_Controller
+
+esp32:
+  variant: esp32s3
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+
+logger:
+
+api:
+  encryption:
+    key: "REPLACE_WITH_YOUR_OWN_32_BYTE_BASE64_KEY"
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: irrigation_west Fallback Hotspot
+    password: "REPLACE_WITH_YOUR_OWN_AP_PASSWORD"
+
+captive_portal:
+# --- Per-zone timers -------------------------------------------------------
+# Each zone's duration number, countdown script, remaining-time sensor and
+# deadline global all come from ONE shared definition: esphome/zone_timer.yaml.
+# Included once per zone below, so all 21 zones across all four controllers
+# share a single implementation instead of 21 hand-maintained copies.
+#
+# `zlabel` reproduces the pre-existing entity names EXACTLY — changing it
+# would move the HA entity_ids and silently break every map and dashboard
+# reference. Expected HA entity IDs after flashing:
+#   number.outside_irrigation_west1_controller_zone_1_duration
+#   number.outside_irrigation_west1_controller_zone_2_duration
+#   number.outside_irrigation_west1_controller_zone_3_duration
+#   number.outside_irrigation_west1_controller_zone_4_duration
+#   number.outside_irrigation_west1_controller_zone_5_duration
+#   number.outside_irrigation_west1_controller_zone_6_duration
+#   ...and one sensor.outside_<node>_<zone>_time_remaining per zone (NEW).
+
+packages:
+  zone1_timer: !include {file: zone_timer.yaml, vars: {zid: zone1, zlabel: "Zone 1"}}
+  zone2_timer: !include {file: zone_timer.yaml, vars: {zid: zone2, zlabel: "Zone 2"}}
+  zone3_timer: !include {file: zone_timer.yaml, vars: {zid: zone3, zlabel: "Zone 3"}}
+  zone4_timer: !include {file: zone_timer.yaml, vars: {zid: zone4, zlabel: "Zone 4"}}
+  zone5_timer: !include {file: zone_timer.yaml, vars: {zid: zone5, zlabel: "Zone 5"}}
+  zone6_timer: !include {file: zone_timer.yaml, vars: {zid: zone6, zlabel: "Zone 6"}}
+
+switch:
+  - platform: gpio
+    id: zone1
+    name: "Zone 1 - South Center A"
+    pin:
+      number: GPIO1
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - if:
+          condition:
+            lambda: |-
+              int others = 0;
+              if (id(zone2).state) others++;
+              if (id(zone3).state) others++;
+              if (id(zone4).state) others++;
+              if (id(zone5).state) others++;
+              if (id(zone6).state) others++;
+              return others >= 2;
+          then:
+            - switch.turn_off: zone1
+          else:
+            - if:
+                condition:
+                  lambda: 'return id(zone1_duration).state <= 0;'
+                then:
+                  - switch.turn_off: zone1
+                else:
+                  - script.execute: zone1_autooff
+    on_turn_off:
+      # A stop must cancel the pending countdown, not leave it armed to
+      # fire later and close a subsequent run early.
+      - script.stop: zone1_autooff
+      - lambda: 'id(zone1_end_ms) = 0;'
+      - component.update: zone1_remaining
+
+  - platform: gpio
+    id: zone2
+    name: "Zone 2 - South Center B"
+    pin:
+      number: GPIO2
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - if:
+          condition:
+            lambda: |-
+              int others = 0;
+              if (id(zone1).state) others++;
+              if (id(zone3).state) others++;
+              if (id(zone4).state) others++;
+              if (id(zone5).state) others++;
+              if (id(zone6).state) others++;
+              return others >= 2;
+          then:
+            - switch.turn_off: zone2
+          else:
+            - if:
+                condition:
+                  lambda: 'return id(zone2_duration).state <= 0;'
+                then:
+                  - switch.turn_off: zone2
+                else:
+                  - script.execute: zone2_autooff
+    on_turn_off:
+      # A stop must cancel the pending countdown, not leave it armed to
+      # fire later and close a subsequent run early.
+      - script.stop: zone2_autooff
+      - lambda: 'id(zone2_end_ms) = 0;'
+      - component.update: zone2_remaining
+
+  - platform: gpio
+    id: zone3
+    name: "Zone 3 - South Center C"
+    pin:
+      number: GPIO41
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - if:
+          condition:
+            lambda: |-
+              int others = 0;
+              if (id(zone1).state) others++;
+              if (id(zone2).state) others++;
+              if (id(zone4).state) others++;
+              if (id(zone5).state) others++;
+              if (id(zone6).state) others++;
+              return others >= 2;
+          then:
+            - switch.turn_off: zone3
+          else:
+            - if:
+                condition:
+                  lambda: 'return id(zone3_duration).state <= 0;'
+                then:
+                  - switch.turn_off: zone3
+                else:
+                  - script.execute: zone3_autooff
+    on_turn_off:
+      # A stop must cancel the pending countdown, not leave it armed to
+      # fire later and close a subsequent run early.
+      - script.stop: zone3_autooff
+      - lambda: 'id(zone3_end_ms) = 0;'
+      - component.update: zone3_remaining
+
+  - platform: gpio
+    id: zone4
+    name: "Zone 4 - Southwest"
+    pin:
+      number: GPIO42
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - if:
+          condition:
+            lambda: |-
+              int others = 0;
+              if (id(zone1).state) others++;
+              if (id(zone2).state) others++;
+              if (id(zone3).state) others++;
+              if (id(zone5).state) others++;
+              if (id(zone6).state) others++;
+              return others >= 2;
+          then:
+            - switch.turn_off: zone4
+          else:
+            - if:
+                condition:
+                  lambda: 'return id(zone4_duration).state <= 0;'
+                then:
+                  - switch.turn_off: zone4
+                else:
+                  - script.execute: zone4_autooff
+    on_turn_off:
+      # A stop must cancel the pending countdown, not leave it armed to
+      # fire later and close a subsequent run early.
+      - script.stop: zone4_autooff
+      - lambda: 'id(zone4_end_ms) = 0;'
+      - component.update: zone4_remaining
+
+  - platform: gpio
+    id: zone5
+    name: "Zone 5 - West Center"
+    pin:
+      number: GPIO45
+      ignore_strapping_warning: true   # GPIO45 is a strapping pin; safe as relay output
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - if:
+          condition:
+            lambda: |-
+              int others = 0;
+              if (id(zone1).state) others++;
+              if (id(zone2).state) others++;
+              if (id(zone3).state) others++;
+              if (id(zone4).state) others++;
+              if (id(zone6).state) others++;
+              return others >= 2;
+          then:
+            - switch.turn_off: zone5
+          else:
+            - if:
+                condition:
+                  lambda: 'return id(zone5_duration).state <= 0;'
+                then:
+                  - switch.turn_off: zone5
+                else:
+                  - script.execute: zone5_autooff
+    on_turn_off:
+      # A stop must cancel the pending countdown, not leave it armed to
+      # fire later and close a subsequent run early.
+      - script.stop: zone5_autooff
+      - lambda: 'id(zone5_end_ms) = 0;'
+      - component.update: zone5_remaining
+
+  - platform: gpio
+    id: zone6
+    name: "Zone 6 - Far West Edge"
+    pin:
+      number: GPIO46
+      ignore_strapping_warning: true   # GPIO46 is a strapping pin; safe as relay output
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - if:
+          condition:
+            lambda: |-
+              int others = 0;
+              if (id(zone1).state) others++;
+              if (id(zone2).state) others++;
+              if (id(zone3).state) others++;
+              if (id(zone4).state) others++;
+              if (id(zone5).state) others++;
+              return others >= 2;
+          then:
+            - switch.turn_off: zone6
+          else:
+            - if:
+                condition:
+                  lambda: 'return id(zone6_duration).state <= 0;'
+                then:
+                  - switch.turn_off: zone6
+                else:
+                  - script.execute: zone6_autooff
+    on_turn_off:
+      # A stop must cancel the pending countdown, not leave it armed to
+      # fire later and close a subsequent run early.
+      - script.stop: zone6_autooff
+      - lambda: 'id(zone6_end_ms) = 0;'
+      - component.update: zone6_remaining
+
+# --- Onboard status RGB LED ---
+# Waveshare ESP32-S3-Relay-6CH(B) onboard addressable (WS2812) RGB LED.
+# Mirrors whichever zone is currently open: blinks N times (N = zone number)
+# followed by a pause, repeating for as long as that zone stays open.
+# Recalculated on every zone on/off — cannot go stale.
+#
+# GPIO38 and rgb_order RGB (not GRB) confirmed on the east board (2026-06-20).
+# Re-verify on this specific board before trusting.
+light:
+  - platform: esp32_rmt_led_strip
+    id: status_led
+    pin: GPIO38
+    num_leds: 1
+    rgb_order: RGB
+    chipset: WS2812
+    name: "Status LED"
+    restore_mode: ALWAYS_OFF
+    default_transition_length: 0s
+
+globals:
+  - id: rgb_active_mask
+    type: int
+    restore_value: false
+    initial_value: '0'
+    # Bitmask bit0=zone1 ... bit5=zone6.
+
+# DRIVE METHOD: 1s interval poll + bitmask, NOT on_turn_on/on_turn_off triggers.
+# on_turn_off fires synchronously during setup() before the RMT light component
+# is ready, causing a boot crash with restore_mode: ALWAYS_OFF. Polling via
+# interval only runs after all components have finished setup().
+interval:
+  - interval: 1s
+    then:
+      - lambda: |-
+          int new_mask = 0;
+          if (id(zone1).state) new_mask |= 1;
+          if (id(zone2).state) new_mask |= 2;
+          if (id(zone3).state) new_mask |= 4;
+          if (id(zone4).state) new_mask |= 8;
+          if (id(zone5).state) new_mask |= 16;
+          if (id(zone6).state) new_mask |= 32;
+          if (new_mask != id(rgb_active_mask)) {
+            id(rgb_active_mask) = new_mask;
+            id(blink_status_led).stop();
+            id(status_led).turn_off().perform();
+            if (new_mask != 0) {
+              id(blink_status_led).execute();
+            }
+          }
+
+script:
+  - id: blink_status_led
+    mode: restart
+    then:
+      - while:
+          condition:
+            lambda: 'return id(rgb_active_mask) != 0;'
+          then:
+            - if:
+                condition:
+                  lambda: 'return id(rgb_active_mask) & 1;'
+                then:
+                  - repeat:
+                      count: 1
+                      then:
+                        - light.turn_on: {id: status_led, brightness: 30%, red: 0.0, green: 1.0, blue: 0.0, transition_length: 0s}
+                        - delay: 250ms
+                        - light.turn_off: {id: status_led, transition_length: 0s}
+                        - delay: 250ms
+                  - delay: 400ms
+            - if:
+                condition:
+                  lambda: 'return id(rgb_active_mask) & 2;'
+                then:
+                  - repeat:
+                      count: 2
+                      then:
+                        - light.turn_on: {id: status_led, brightness: 30%, red: 0.0, green: 1.0, blue: 0.0, transition_length: 0s}
+                        - delay: 250ms
+                        - light.turn_off: {id: status_led, transition_length: 0s}
+                        - delay: 250ms
+                  - delay: 400ms
+            - if:
+                condition:
+                  lambda: 'return id(rgb_active_mask) & 4;'
+                then:
+                  - repeat:
+                      count: 3
+                      then:
+                        - light.turn_on: {id: status_led, brightness: 30%, red: 0.0, green: 1.0, blue: 0.0, transition_length: 0s}
+                        - delay: 250ms
+                        - light.turn_off: {id: status_led, transition_length: 0s}
+                        - delay: 250ms
+                  - delay: 400ms
+            - if:
+                condition:
+                  lambda: 'return id(rgb_active_mask) & 8;'
+                then:
+                  - repeat:
+                      count: 4
+                      then:
+                        - light.turn_on: {id: status_led, brightness: 30%, red: 0.0, green: 1.0, blue: 0.0, transition_length: 0s}
+                        - delay: 250ms
+                        - light.turn_off: {id: status_led, transition_length: 0s}
+                        - delay: 250ms
+                  - delay: 400ms
+            - if:
+                condition:
+                  lambda: 'return id(rgb_active_mask) & 16;'
+                then:
+                  - repeat:
+                      count: 5
+                      then:
+                        - light.turn_on: {id: status_led, brightness: 30%, red: 0.0, green: 1.0, blue: 0.0, transition_length: 0s}
+                        - delay: 250ms
+                        - light.turn_off: {id: status_led, transition_length: 0s}
+                        - delay: 250ms
+                  - delay: 400ms
+            - if:
+                condition:
+                  lambda: 'return id(rgb_active_mask) & 32;'
+                then:
+                  - repeat:
+                      count: 6
+                      then:
+                        - light.turn_on: {id: status_led, brightness: 30%, red: 0.0, green: 1.0, blue: 0.0, transition_length: 0s}
+                        - delay: 250ms
+                        - light.turn_off: {id: status_led, transition_length: 0s}
+                        - delay: 250ms
+                  - delay: 400ms
+            - delay: 700ms
+
+# NOTE: verify relay polarity jumper (item 20 in Waveshare diagram) on this
+# board before trusting restore_mode: ALWAYS_OFF = valve closed.
+
+sensor:
+  - platform: wifi_signal
+    name: "Irrigation West1 WiFi Signal"
+    update_interval: 60s
+
+  - platform: uptime
+    name: "Irrigation West1 Uptime"
+
+# --- Build marker ------------------------------------------------------------
+# Publishes the revision above as an HA entity so "which build is actually
+# flashed?" is answerable without guessing. Rev 1 has no such entity, so its
+# absence is itself the answer.
+text_sensor:
+  - platform: template
+    name: "Config Revision"
+    id: config_revision
+    icon: mdi:tag-check
+    update_interval: 300s
+    lambda: 'return {"2.02"};'
+
+  - platform: version
+    name: "Irrigation West1 ESPHome Version"

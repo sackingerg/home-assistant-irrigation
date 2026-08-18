@@ -1,0 +1,194 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# IRRIGATION GARDEN — 3-ZONE GARDEN CONTROLLER
+# Package: packages/irrigation_garden.yaml
+#
+# PURPOSE
+# -------
+# Manual control and per-zone identity for the 3-zone Irrigation_Garden_Controller
+# (ESPHome node: irrigation_garden_controller). Covers: Strawberries (Zone 1),
+# Blueberry-Blackberry Bed (Zone 2), Dripper System (Zone 3) — all on the
+# north side of house.
+#
+# SCHEDULING: week-based, per-zone scheduling lives in packages/scheduling_core.yaml
+# as a generic schedule.* -> switch reactor. The schedule.* helpers themselves
+# MUST be UI-created storage helpers (Settings -> Devices & Services -> Helpers
+# -> Schedule) — YAML-defined schedule entities open in the editor but their
+# "add block" control is disabled. When the garden schedule helpers are created
+# via UI, their entity_ids need to be wired into scheduling_core.yaml's maps.
+#
+# SCHEDULE ONBOARDING CHECKLIST (do this once the garden controller is
+# confirmed working and you're ready to schedule it):
+#   1. Create 3 schedule helpers via Settings -> Helpers:
+#        "Garden Zone 1 Schedule"   → entity_id: schedule.outside_garden_zone_1_schedule
+#        "Garden Zone 2 Schedule"   → entity_id: schedule.outside_garden_zone_2_schedule
+#        "Garden Zone 3 Schedule"   → entity_id: schedule.outside_garden_zone_3_schedule
+#   2. Wire them into scheduling_core.yaml: add each to the reactor trigger
+#      list, all_zone_schedules, and the five zone_* maps.
+#   3. Set schedule blocks via the dashboard's weekly grid editor.
+#
+# ZONE HARDWARE ENTITIES  (ESPHome switches — confirmed 2026-06-25, no area prefix)
+# ─────────────────────────────────────────────────────────────────────────────
+#   switch.outside_irrigation_garden_controller_zone_1_strawberries
+#   switch.outside_irrigation_garden_controller_zone_2_blueberry_blackberry_bed
+#   switch.outside_irrigation_garden_controller_zone_3_dripper_system
+#
+# DEVICE DIAGNOSTICS  (read-only — used on dashboard)
+#   sensor.outside_irrigation_garden_controller_irrigation_garden_controller_wifi_signal
+#   sensor.outside_irrigation_garden_controller_irrigation_garden_controller_uptime
+#
+# HELPERS DEFINED IN THIS FILE
+# ─────────────────────────────────────────────────────────────────────────────
+# input_boolean:
+#   outside_garden_schedule_enabled           master schedule on/off toggle
+#   outside_garden_zone_1_enabled … 3        per-zone mute
+#
+# input_number:
+#   outside_garden_zone_1_duration            4 min default (strawberries)
+#   outside_garden_zone_2_duration            5 min default (blueberry/blackberry)
+#   outside_garden_zone_3_duration           40 min default (dripper)
+#
+# input_text:
+#   outside_garden_status                     human-readable status / last action
+#
+# timer:
+#   outside_garden_zone_1_timer … 3          per-zone visible countdown
+#
+# SCRIPTS — NONE ARE DEFINED IN THIS FILE (since 2026-08-10)
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers only. Behaviour is shared, in packages/irrigation_zone_engine.yaml,
+# called with system: garden — irrigation_run_zone, irrigation_stop_zone,
+# irrigation_stop_controller, irrigation_sequential_run.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BOOLEAN HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+input_boolean:
+
+  outside_garden_schedule_enabled:
+    name: "Garden Schedule Enabled"
+    icon: mdi:calendar-clock
+
+  outside_garden_zone_1_enabled:
+    name: "Garden Zone 1 Enabled"
+    icon: mdi:food-strawberry
+
+  outside_garden_zone_2_enabled:
+    name: "Garden Zone 2 Enabled"
+    icon: mdi:fruit-grapes
+
+  outside_garden_zone_3_enabled:
+    name: "Garden Zone 3 Enabled"
+    icon: mdi:water-pump
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# NUMBER HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+input_number:
+
+  # Default durations match firmware auto-off ceilings (confirmed 2026-06-23).
+  # Used ONLY by manual runs (irrigation_run_zone). Scheduled runs use the
+  # schedule block's own start/end time instead.
+
+  outside_garden_zone_1_duration:
+    name: "Garden Zone 1 Duration"
+    min: 1
+    max: 60
+    step: 1
+    initial: 4
+    unit_of_measurement: "min"
+    icon: mdi:timer
+    mode: slider
+
+  outside_garden_zone_2_duration:
+    name: "Garden Zone 2 Duration"
+    min: 1
+    max: 60
+    step: 1
+    initial: 5
+    unit_of_measurement: "min"
+    icon: mdi:timer
+    mode: slider
+
+  # Dripper system runs up to 40 min — slider range extended to 120 min
+  # to cover a longer soak if needed without hitting the ceiling.
+  outside_garden_zone_3_duration:
+    name: "Garden Zone 3 Duration"
+    min: 1
+    max: 60
+    step: 1
+    initial: 40
+    unit_of_measurement: "min"
+    icon: mdi:timer
+    mode: slider
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TEXT HELPER — STATUS MESSAGE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+input_text:
+
+  outside_garden_status:
+    name: "Garden Status"
+    initial: "Idle"
+    icon: mdi:information-outline
+    max: 255
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TIMERS — PER-ZONE COUNTDOWN
+# ═══════════════════════════════════════════════════════════════════════════════
+# Display-only. The ESP32 owns valve timing; these just drive the dashboard.
+#
+# RESTART POLICY: restore: false (corrected 2026-08-07 — these were restore:
+# true). The controller's duration numbers are restore_value: false, so after
+# a reboot the firmware has forgotten the run and the valve is shut. A restored
+# countdown would keep ticking as though water were still flowing.
+
+timer:
+  outside_garden_zone_1_timer:
+    name: "Garden Zone 1 Timer"
+    icon: mdi:timer-sand
+    restore: false
+
+  outside_garden_zone_2_timer:
+    name: "Garden Zone 2 Timer"
+    icon: mdi:timer-sand
+    restore: false
+
+  outside_garden_zone_3_timer:
+    name: "Garden Zone 3 Timer"
+    icon: mdi:timer-sand
+    restore: false
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCRIPTS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# NOTE: this package no longer defines any scripts.
+# ───────────────────────────────────────────────────────────────────────────
+# The three scripts that used to live here — garden_run_single_zone, garden_stop_all, garden_sequential_run —
+# were removed 2026-08-10 and replaced by ONE generic implementation in
+# packages/irrigation_zone_engine.yaml:
+#
+#     script.irrigation_run_zone         (system, zone[, run_minutes])
+#     script.irrigation_stop_zone        (system, zone)
+#     script.irrigation_stop_controller  (system)
+#     script.irrigation_sequential_run   (system)
+#
+# WHY: four hand-maintained copies of the same logic had drifted. West 1 and
+# West 2 ended a manual run with an unconditional switch.turn_off after a
+# plain delay; East and Garden did not. Because the script was mode: parallel,
+# each "Run Now" press left a delayed shutoff behind that cut short whatever
+# run was in progress when it fired — a 15-minute run measured 10m44s on
+# 2026-08-10. One implementation means no controller can drift again.
+#
+# This file now owns only this controller's HELPERS. Behaviour is shared.
+# ───────────────────────────────────────────────────────────────────────────

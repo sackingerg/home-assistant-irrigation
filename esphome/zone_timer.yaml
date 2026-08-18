@@ -1,0 +1,165 @@
+# ═════════════════════════════════════════════════════════════════════════════
+# VERSION: 2.02  (2026-08-17)
+#
+#   2.02  Time Remaining: 60 s interval instead of 10 s (run lengths are whole
+#         minutes, so 10 s over-sampled), plus component.update on start,
+#         reset and stop so those transitions are immediate rather than polled.
+#   2.01  delta: 1 filter on Time Remaining — an idle zone no longer republishes
+#         the same 0 every interval. Six identical log lines per board per 10 s.
+#   2.00  Countdown moved out of an inline `delay:` in on_turn_on and into a
+#         per-zone `mode: restart` script driven by the duration number's
+#         on_value. Re-arming a RUNNING zone now restarts its countdown in
+#         place instead of doing nothing. Adds a Time Remaining sensor per zone
+#         and a Config Revision text sensor. Shared file: esphome/zone_timer.yaml.
+#   1.00  Original — auto-off was an inline `delay:` read once at valve-open.
+#         The duration number was inert for the rest of the run.
+#
+# VERSIONING RULE: any modification to this file bumps VERSION by >= 0.01, bug
+# fixes included. The Config Revision text sensor below must be bumped to match
+# in the same edit — a header comment describes the FILE, the sensor describes
+# what is actually running on the CHIP. Three installs on 2026-08-17 silently
+# flashed the old build because nothing reported the latter.
+# ═════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
+# ZONE TIMER — shared definition, included once per zone on every controller
+# File: esphome/zone_timer.yaml                              (created 2026-08-17)
+#
+# Included via the `packages:` block of each controller, six times (three on
+# Garden). Everything a zone needs to time itself lives here, so there is ONE
+# copy of this logic for all 21 zones rather than 21 hand-maintained copies.
+#
+#   packages:
+#     zone1_timer: !include {file: zone_timer.yaml, vars: {zid: zone1, zlabel: "Zone 1"}}
+#
+# VARIABLES  (declared by the caller, used throughout — see ${...} below)
+# ─────────────────────────────────────────────────────────────────────────────
+#   zid      the switch's id on this board            e.g. zone1
+#   zlabel   human prefix for entity names            e.g. "Zone 1"
+#            -> "Zone 1 Duration", "Zone 1 Time Remaining"
+#            MUST match the existing name exactly or the HA entity_id changes
+#            and every map, script and dashboard reference breaks silently.
+#
+# WHY THIS FILE EXISTS — the bug it fixes
+# ─────────────────────────────────────────────────────────────────────────────
+# The auto-off used to be an inline `delay:` inside each zone's on_turn_on:
+#
+#     - delay: !lambda 'return (uint32_t)(id(zone1_duration).state * 60000);'
+#     - switch.turn_off: zone1
+#
+# That lambda is evaluated ONCE, when the valve opens, and becomes a fixed
+# deadline in the scheduler. Nothing ever re-read the duration number again, so:
+#
+#   * writing a new duration mid-run did nothing — the valve still closed on
+#     the original deadline, while HA and the device both displayed the new
+#     value. The number was a lie for the rest of the run.
+#   * re-issuing switch.turn_on did nothing either: ESPHome de-duplicates
+#     publish_state, so on_turn_on does not re-fire for an already-open valve.
+#   * the only way to re-read the arming was to close and reopen the valve.
+#
+# The duration number is presented everywhere as THE control for run length.
+# Now it actually is one: writing it while the zone runs restarts the
+# countdown, in place, without touching the valve.
+#
+# HOW IT WORKS
+# ─────────────────────────────────────────────────────────────────────────────
+#   ${zid}_autooff is `mode: restart`. Re-executing it CANCELS the pending
+#   countdown before starting the new one, so a zone can never accumulate two
+#   deadlines. That property is the whole point: an inline delay left a stale
+#   deadline armed after any close/reopen, which could close a later run early.
+#
+#   Two guards on the number's on_value, both load-bearing:
+#     switch.is_on   HA arms the duration BEFORE opening the valve. Without
+#                    this guard that write would start the countdown while the
+#                    valve is still shut, and the run would end early.
+#     x > 0          every stop path writes 0 to disarm the zone. Without this
+#                    guard a disarm would be read as a reset and start a run.
+#
+# FIRMWARE REMAINS THE SINGLE SOURCE OF SHUTOFF TRUTH. HA arms and opens; the
+# ESP32 closes. Nothing here waits on HA, and a zone still auto-offs with HA
+# stopped, unreachable, or powered down.
+# ─────────────────────────────────────────────────────────────────────────────
+
+globals:
+  # Wall-clock deadline for the run in progress, as a millis() value.
+  # 0 means "not running". Feeds the Time Remaining sensor only — the actual
+  # shutoff is the script's delay, not a comparison against this.
+  # restore_value: false — a reboot must never resurrect a deadline.
+  - id: ${zid}_end_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+
+number:
+  # THE ARMING. Zero = disarmed; the firmware refuses to open the valve.
+  # Non-zero = permitted to run, for this many minutes.
+  # restore_value: false + initial_value 0 — a controller that reboots on its
+  # own comes back disarmed and cannot open anything until HA re-arms it.
+  - platform: template
+    name: "${zlabel} Duration"
+    id: ${zid}_duration
+    min_value: 0
+    max_value: 240
+    step: 1
+    unit_of_measurement: min
+    initial_value: 0
+    optimistic: true
+    restore_value: false
+    on_value:
+      # Re-arming a RUNNING zone restarts its countdown in place. This is the
+      # behaviour the inline delay never had.
+      - if:
+          condition:
+            and:
+              - switch.is_on: ${zid}
+              - lambda: 'return x > 0;'
+          then:
+            - script.execute: ${zid}_autooff
+
+script:
+  # The countdown. mode: restart is what makes a reset possible and what
+  # guarantees a zone never holds two deadlines at once.
+  - id: ${zid}_autooff
+    mode: restart
+    then:
+      - lambda: |-
+          id(${zid}_end_ms) = millis() + (uint32_t)(id(${zid}_duration).state * 60000);
+      # Publish at once so a start or a reset shows immediately rather than
+      # waiting for the next 60 s poll.
+      - component.update: ${zid}_remaining
+      - delay: !lambda 'return (uint32_t)(id(${zid}_duration).state * 60000);'
+      - switch.turn_off: ${zid}
+
+sensor:
+  # Seconds left on the FIRMWARE's countdown — the authoritative figure.
+  # HA's timer helper is an independent guess started at the same moment; this
+  # is what the controller will actually act on. Reads 0 whenever the zone is
+  # not running, so it forgets the previous run as soon as the next one starts.
+  #
+  # RECORDER: excluded via sensor.outside_irrigation_*_time_remaining in
+  # configuration.yaml — a live countdown has no historical value.
+  #
+  # INTERVAL: 60 s, not 10 s. Run lengths are whole minutes (the duration
+  # number's step is 1 min), so sampling a countdown six times a minute is
+  # finer than anything it can measure — it just produced six identical log
+  # lines per board every 10 s.
+  #
+  # Polling alone would make a start or a reset take up to 60 s to appear, so
+  # the countdown script publishes immediately whenever it (re)starts. The
+  # poll then only walks the value down; the interesting transitions are
+  # instant. on_turn_off does the same at the end of a run.
+  #
+  # The delta filter suppresses a repeat of the same value, so an idle zone
+  # stays silent entirely while a running one reports once a minute.
+  - platform: template
+    name: "${zlabel} Time Remaining"
+    id: ${zid}_remaining
+    unit_of_measurement: s
+    accuracy_decimals: 0
+    update_interval: 60s
+    filters:
+      - delta: 1
+    lambda: |-
+      if (!id(${zid}).state || id(${zid}_end_ms) == 0) return 0;
+      uint32_t now_ms = millis();
+      if (now_ms >= id(${zid}_end_ms)) return 0;
+      return (id(${zid}_end_ms) - now_ms) / 1000.0f;
