@@ -29,7 +29,8 @@ from that split.
 - **Flow budgeting against a single well pump.** Every zone has a GPM figure. The system
   shows live total draw, warns when the *programmed* weekly grid would exceed the pump, and
   refuses to start a manual multi-zone run that would go over GPM limit.
-- **Three layers of shutoff safety**, two of them in firmware and independent of HA.
+- **Three layers of shutoff safety, all of them in firmware** and independent of HA. Home
+  Assistant holds no timeout and no failsafe — it closes a valve only when you press Stop.
 - **An action log that records what actually happened** runtimes computed from the
   valve's own state timestamps, so manual toggles, interrupted runs and firmware refusals
   all show up, not just what was commanded.
@@ -184,25 +185,38 @@ independent shutoff that outlived its own run. Four presses on one zone produced
 | press 4 | 15:43:54 | 15:54:38 | **press 3's** delay (15:39:38 + 15:00) |
 
 A 15-minute run measured 10 min 44 s. Every OFF landed exactly 15:00 after an *earlier*
-press. The fix is to wait for the valve rather than schedule its close:
+press. The fix is to wait for the valve rather than schedule its close.
+
+The first version of that fix kept a backstop — the same wait, but with a timeout of
+`dur_min * 60 + 45` that closed the valve if the firmware hadn't. It looked prudent and it
+was the same bug in a costume. The timeout was computed from the duration the run *started*
+with, so once the countdown became restartable (idea 2), any mid-run change left it stale:
+
+| | |
+|---|---|
+| 15:45:07 | valve ON, armed 21 min |
+| 15:50:19 | re-armed to 31 min — **firmware** countdown restarts, 1860 s |
+| 16:06:52 | = 15:45:07 + 21 min 45 s — **HA's** stale backstop expires |
+| 16:06:54 | valve OFF, firmware countdown still reading 867 s |
+
+A 31-minute run measured 22, and HA logged it as a firmware fault. The script is
+`mode: parallel`, so the instance that expired belonged to the first press while the run it
+closed belonged to the second — the table above, one layer up.
+
+So the backstop is gone entirely, not repaired. The whole of it is now:
 
 ```yaml
 - wait_template: "{{ is_state(z.switch, 'off') }}"
-  timeout:
-    seconds: "{{ (dur_min * 60 + 45) | int }}"
-  continue_on_timeout: true
-# only intervene if the firmware genuinely failed to close it
-- if:
-      - condition: template
-        value_template: "{{ is_state(z.switch, 'on') }}"
-  then:
-      - action: switch.turn_off
-        target: {entity_id: "{{ z.switch }}"}
 ```
 
-An instance whose run ended early exits cleanly and leaves nothing behind. The root cause
-was four hand-maintained copies of the same script that had drifted apart, which is why
-there is now exactly one.
+No timeout, no `switch.turn_off` anywhere in the runner. An instance whose run ended early
+exits cleanly and leaves nothing behind, and one whose run was extended simply keeps waiting.
+The cost is that a firmware which never closes a valve has nothing catching it — accepted,
+because every deadline HA held turned out to be a deadline HA could act on wrongly, and both
+of them did. If that check is ever wanted it belongs on the chip, where the countdown is.
+
+The original root cause was four hand-maintained copies of the same script that had drifted
+apart, which is why there is now exactly one.
 
 ### 4. Why nothing blocks at runtime
 

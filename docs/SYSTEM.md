@@ -201,10 +201,11 @@ made the previous inline-`delay:` design unsafe to reset. See §10 stage 12.
 2026-08-17 three installs in a row silently flashed an old build and nothing reported it;
 the Overview header now reads all four and flags any mismatch.
 
-**HA never sends `switch.turn_off` during a normal run.** The only signals for a run are
-`number.set_value` (duration) then `switch.turn_on`. `turn_off` comes only from the stop
-scripts, or from HA's backstop if the firmware fails to auto-off — and that backstop is
-loud, because it means a real fault.
+**HA never sends `switch.turn_off` unless the operator asked for it.** The only signals for a
+run are `number.set_value` (duration) then `switch.turn_on`. `turn_off` comes from the stop
+scripts and from nowhere else — no timeout, no backstop, no second opinion about when a run
+should end. The ESP32 owns shutoff completely, and the one time HA was allowed a deadline of
+its own it used it to truncate a healthy run (§10, Stage 15).
 
 ---
 
@@ -346,6 +347,11 @@ would reopen a valve just as it was being closed — then calls each per-system 
 ## 6. Safety model
 
 Layered, outermost first. Only two layers actually *prevent* anything.
+
+**Every layer that closes a valve is in firmware.** Home Assistant holds no deadline, no
+timeout and no failsafe; it arms a run and then only ever closes a valve because the operator
+pressed Stop. This is a hard rule, not an oversight — see §10 Stage 15 for the run it cost to
+learn it, and §12 for what the rule gives up.
 
 | Layer | Where | Enforces? | What it does |
 |---|---|---|---|
@@ -667,6 +673,26 @@ a manual press could genuinely change a running zone, it also had to be prevente
 changing a *scheduled* one, so the guard in §5 Path B was added. At the same time manual
 single-zone runs gained the GPM reporting they had never had (§7d).
 
+**Stage 15 — HA stopped holding deadlines (2026-08-20, current).** Making the countdown
+restartable reintroduced Stage 12's bug from the opposite direction. The zone runner still
+carried a backstop — a `wait_template` whose timeout was `dur_min * 60 + 45`, closing the
+valve if the firmware had not — and that timeout was computed from the duration the run
+*started* with. A mid-run reset extended the firmware's countdown. The backstop's did not
+move with it.
+
+West 1 Zone 6, 2026-08-20: opened 15:45:07 armed for 21 min, re-armed to 31 min at 15:50:19,
+closed 16:06:54 — which is 15:45:07 plus 21 min 45 s exactly, with the firmware's own
+countdown still reading 867 s. HA then raised "zone did not auto-off", blaming a controller
+that had done everything right. And because the runner is `mode: parallel`, the instance that
+expired belonged to the *first* press while the run it closed belonged to the *second*: Stage
+12's parallel-shutoff bug wearing a different hat.
+
+The backstop was removed outright rather than repaired. `irrigation_run_zone` now holds no
+deadline of any kind — it arms the zone, waits for the valve, and does its bookkeeping. A
+firmware that fails to auto-off leaves its valve open until someone presses Stop. That gap is
+accepted (§12) on the reasoning that any deadline HA holds is a deadline HA can act on
+wrongly, and both times it held one, it did.
+
 ---
 
 ## 11. Improvements this design bought
@@ -715,6 +741,13 @@ actually renamed.
   their accuracy.
 - **No flow or pressure sensing.** A stuck valve, burst line or dead pump is invisible; the
   system reports what it *commanded*, not what flowed.
+- **Nothing catches a firmware that fails to auto-off.** If a controller opens a valve and
+  never closes it, the valve stays open until someone presses Stop. HA is deliberately not
+  watching for this (§6): the backstop that used to watch cost a healthy run (§10 Stage 15),
+  because judging a controller overdue means judging its own countdown, and HA's copy of
+  that countdown is always a little behind the chip's. If this is ever wanted, it belongs in
+  `zone_timer.yaml` — the firmware declaring itself overdue, with HA relaying the verdict
+  rather than reaching one.
 
 **Known gaps — would be worth fixing**
 

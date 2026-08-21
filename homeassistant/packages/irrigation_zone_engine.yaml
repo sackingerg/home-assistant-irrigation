@@ -1,21 +1,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# VERSION: 1.04  (2026-08-18)
+# VERSION: 1.07  (2026-08-20)
 #
-#   1.04  Header wording only — dropped a reference to a package that no longer
-#         exists, which read as a dangling file name in the published copy.
-#   1.03  Single-run GPM: every manual zone start reports its projected pump
-#         load in the status line, and warns loudly when over the limit —
-#         notification, system log and action log. Never blocks; the firmware
-#         max-2 interlock remains the only runtime refusal.
-#   1.02  Scheduled-run guard: a manual press on a zone already running from
-#         its weekly block is ignored, and the controller is not contacted at
-#         all, so the scheduled runtime is adhered to exactly. Adds `schedule`
-#         to every zone_registry row and a sys_master map.
-#   1.01  run_controller and stop_all_systems moved in from a separate package,
-#         deleting its duplicate 21-row zone table. Every script declares all
-#         variables in one top-level block.
-#   1.00  Created — replaced 12 per-controller scripts with 6 generic ones
-#         driven by a single zone registry.
+#   1.07  Bug fixes.
 #
 # VERSIONING RULE: any modification bumps VERSION by >= 0.01, bug fixes included.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -53,10 +39,16 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # irrigation_run_zone does not sleep for the duration and then close the valve.
 # It WAITS for the valve to close — by firmware auto-off, by the Stop button, or
-# by a stop-all — and only intervenes if the wait times out with the valve still
-# open. An instance whose run ended early exits cleanly instead of leaving a
-# delayed shutoff behind. The backstop is kept and made LOUD: a firmware that
-# fails to auto-off is a real fault worth seeing.
+# by a stop-all — and then does its bookkeeping. An instance whose run ended
+# early exits cleanly instead of leaving a delayed shutoff behind.
+#
+# It does not intervene, ever. There is no HA failsafe (operator's rule,
+# 2026-08-20): the ESP32 owns shutoff and HA does not get a second opinion about
+# when a run should end. A firmware that fails to auto-off leaves the valve open
+# until the operator presses Stop, because the alternative is HA closing valves
+# on a deadline of its own and getting it wrong — which it did on 2026-08-20,
+# truncating a 31 min run to 22 when a mid-run duration reset outlived the
+# deadline that run had started with.
 #
 # STOP SEMANTICS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -134,7 +126,11 @@ script:
     alias: "Irrigation — Run Zone"
     icon: mdi:water
     mode: parallel
-    max: 21
+    # 21 zones, but an instance now lives until its valve actually closes, so
+    # repeated Run Now presses on one zone stack up instances that are all
+    # waiting on the same switch. They wake together and do the same harmless
+    # idempotent cleanup; they just need slots. Sized for that, not for zones.
+    max: 60
     description: >-
       Runs one zone on one controller for its Run Now duration, or for an
       explicit run_minutes override. Arms the controller's duration number,
@@ -398,43 +394,41 @@ script:
       - delay:
           seconds: 2
 
-      # THE FIX. Wait for the valve to close instead of scheduling a close.
+      # Wait for the valve to close instead of scheduling a close.
       # wait_template, not wait_for_trigger: if the firmware already rejected
       # the start, the condition is true immediately and this exits at once
       # instead of hanging until the timeout.
+      #
+      # NOTHING BELOW THIS LINE EVER CLOSES A VALVE.  (operator's rule, 2026-08-20)
+      # The ESP32 owns shutoff, full stop. HA closes a valve only where the
+      # operator asked it to — the Stop, Stop Controller and Stop All buttons.
+      # There is no HA failsafe, by design.
+      #
+      # There is also no duration-derived timeout, because a duration is not a
+      # deadline. Pressing Run Now again with a new slider value restarts the
+      # firmware countdown in place, so a timeout computed when THIS instance
+      # started goes stale the moment that happens. This script is mode:
+      # parallel, so a stale instance acting on its own expiry acts on somebody
+      # else's run — the 2026-08-10 parallel-shutoff bug wearing a new hat. On
+      # 2026-08-20 it cut West 1 Z6 from 31 min to 22: the first press's
+      # timeout (21 min + 45 s) fired while the firmware still had 14½ min to go
+      # on the reset countdown, closed the valve, and blamed the firmware.
+      #
+      # There is no timeout at all. Not even a long one: any deadline HA holds
+      # is a deadline HA can act on wrongly, and this script has now done that
+      # once. The instance simply waits for the valve, however long that is.
+      #
+      # A zone whose firmware never closes it therefore leaves an instance
+      # waiting here. That is intended. It is a hardware fault on that board,
+      # and it is the operator's to clear with the Stop button — not something
+      # HA quietly tidies up behind them.
+      #
+      # Nothing in HA watches for it, deliberately. Deciding that a controller
+      # is overdue means judging the controller's own countdown, and that
+      # judgment belongs on the chip. If it is ever wanted, it goes in
+      # zone_timer.yaml — the firmware declares itself overdue and HA relays
+      # the verdict instead of reaching one.
       - wait_template: "{{ is_state(z.switch, 'off') }}"
-        timeout:
-          seconds: "{{ (dur_min | float(5) * 60 + 45) | int }}"
-        continue_on_timeout: true
-
-      # Backstop — only reached if the firmware did NOT close the valve on time.
-      # That is a genuine fault: say so.
-      - if:
-          - condition: template
-            value_template: "{{ is_state(z.switch, 'on') }}"
-        then:
-          - action: system_log.write
-            data:
-              level: warning
-              logger: irrigation.run_zone
-              message: >-
-                {{ sys_label.get(system) }} {{ z.label }} did not auto-off after
-                {{ dur_min }} min — HA closed the valve as a backstop. The
-                controller's firmware timer may not be working.
-          - action: switch.turn_off
-            target:
-              entity_id: "{{ z.switch }}"
-          - action: persistent_notification.create
-            data:
-              notification_id: "irrigation_no_autooff_{{ system }}_{{ zone }}"
-              title: "⚠️ Zone did not auto-off"
-              message: |-
-                **{{ sys_label.get(system) }} — {{ z.label }}** was still open
-                {{ dur_min }} minutes after it started. Home Assistant closed the
-                valve as a backstop.
-
-                The ESP32 is supposed to close it without being told. Check that
-                controller's firmware and its duration number.
 
       - action: timer.cancel
         target:
