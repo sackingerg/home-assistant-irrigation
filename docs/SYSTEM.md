@@ -12,9 +12,9 @@ your own.
 > with these sprinklers. It is a separate subsystem on its own hardware and is **not part
 > of this repository**.
 
-*Last verified against the live box: 2026-08-18 (entity registry, live states, recorder
-history, and every package and firmware file re-read from `/config`). Firmware 2.02 on all
-four controllers; `irrigation_zone_engine.yaml` and `irrigation_action_log.yaml` at 1.03.*
+*Last verified against the live box: 2026-08-20 (entity registry, live states and recorder
+history). Firmware 2.02 on all four controllers; `irrigation_zone_engine.yaml` at 1.07,
+`irrigation_action_log.yaml` at 1.03, `dashboards/irrigation.yaml` at 1.01.*
 
 ---
 
